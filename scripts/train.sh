@@ -43,16 +43,24 @@ CORES=${SLURM_JOB_CPUS_PER_NODE:-$(lscpu -p | egrep -v '^#' | wc -l)}
 # Get memory in GB
 MEMGB=$(awk '/MemTotal/ {print int($2/1024/1024)}' /proc/meminfo)
 
-# Set the number of jobs
+# Set the number of jobs (max 12)
 JOBS=${TOTALSPINESEG_JOBS:-$CORES}
+JOBS=$(( JOBS > 12 ? 12 : JOBS ))
 
-# Set the number of jobs for the nnUNet
+# Set the number of jobs for the nnUNet (max 12)
 JOBSNN=$(( JOBS < $((MEMGB / 8)) ? JOBS : $((MEMGB / 8)) ))
 JOBSNN=$(( JOBSNN < 1 ? 1 : JOBSNN ))
+JOBSNN=$(( JOBSNN > 12 ? 12 : JOBSNN ))
 JOBSNN=${TOTALSPINESEG_JOBSNN:-$JOBSNN}
+# Ensure JOBSNN doesn't exceed 12 even if set via environment variable
+JOBSNN=$(( JOBSNN > 12 ? 12 : JOBSNN ))
 
 # Set the device to cpu if cuda is not available
 DEVICE=${TOTALSPINESEG_DEVICE:-$(python3 -c "import torch; print('cuda' if torch.cuda.is_available() else 'cpu')")}
+
+# Apply torch compatibility patch before importing nnUNet
+# This fixes the OptimizedModule import error
+python3 -c "import sys; sys.path.insert(0, '$(realpath "$TOTALSPINESEG")'); from totalspineseg.utils import torch_compat" 2>/dev/null || true
 
 # Set nnunet params
 export nnUNet_def_n_proc=$JOBSNN
@@ -62,6 +70,10 @@ export nnUNet_preprocessed="$TOTALSPINESEG_DATA"/nnUNet/preprocessed
 export nnUNet_results="$TOTALSPINESEG_DATA"/nnUNet/results
 export nnUNet_exports="$TOTALSPINESEG_DATA"/nnUNet/exports
 
+# Disable PyTorch compilation to avoid issues
+export TORCH_COMPILE_DISABLE=1
+export TORCHDYNAMO_DISABLE=1
+
 nnUNetTrainer=${3:-nnUNetTrainer_DASegOrd0_NoMirroring}
 nnUNetPlanner=${4:-ExperimentPlanner}
 # Note on nnUNetPlans_small configuration:
@@ -70,7 +82,7 @@ nnUNetPlanner=${4:-ExperimentPlanner}
 # Make any necessary updates to this file before starting the training process.
 nnUNetPlans=${5:-nnUNetPlans_small}
 configuration=3d_fullres
-data_identifier=nnUNetPlans_3d_fullres
+data_identifier=${nnUNetPlans}_${configuration}
 
 echo ""
 echo "Running with the following parameters:"
@@ -93,6 +105,7 @@ for d in ${DATASETS[@]}; do
     # Get the dataset name
     d_name=$(basename "$(ls -d "$nnUNet_raw"/Dataset${d}_*)")
 
+    TEMPORARILY DISABLED: Preprocessing steps
     if [ ! -f "$nnUNet_preprocessed"/$d_name/dataset_fingerprint.json ]; then
         echo "Extracting fingerprint dataset $d_name"
         # --verify_dataset_integrity not working in nnunetv2==2.4.2
