@@ -70,9 +70,6 @@ export nnUNet_preprocessed="$TOTALSPINESEG_DATA"/nnUNet/preprocessed
 export nnUNet_results="$TOTALSPINESEG_DATA"/nnUNet/results
 export nnUNet_exports="$TOTALSPINESEG_DATA"/nnUNet/exports
 
-# Disable PyTorch compilation to avoid issues
-export TORCH_COMPILE_DISABLE=1
-export TORCHDYNAMO_DISABLE=1
 
 nnUNetTrainer=${3:-nnUNetTrainer_DASegOrd0_NoMirroring}
 nnUNetPlanner=${4:-ExperimentPlanner}
@@ -105,7 +102,6 @@ for d in ${DATASETS[@]}; do
     # Get the dataset name
     d_name=$(basename "$(ls -d "$nnUNet_raw"/Dataset${d}_*)")
 
-    TEMPORARILY DISABLED: Preprocessing steps
     if [ ! -f "$nnUNet_preprocessed"/$d_name/dataset_fingerprint.json ]; then
         echo "Extracting fingerprint dataset $d_name"
         # --verify_dataset_integrity not working in nnunetv2==2.4.2
