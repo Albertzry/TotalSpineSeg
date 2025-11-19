@@ -45,7 +45,7 @@ resources="$TOTALSPINESEG"/totalspineseg/resources
 CORES=${SLURM_JOB_CPUS_PER_NODE:-$(lscpu -p | egrep -v '^#' | wc -l)}
 
 # Set the number of jobs
-JOBS=${TOTALSPINESEG_JOBS:-$CORES}
+JOBS=12
 
 # Set nnunet params
 nnUNet_raw="$TOTALSPINESEG_DATA"/nnUNet/raw
