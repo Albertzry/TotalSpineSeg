@@ -66,6 +66,13 @@ datasets_words=()
 for dsp in "$bids"/*; do
     # Get the dataset name
     dsn=$(basename "$dsp");
+    
+    # Skip data_ori
+    if [ "$dsn" == "data_ori" ]; then
+        echo "Skipping data_ori..."
+        continue
+    fi
+
     # Get dataset word from the dataset name
     dsw=${dsn#data-}; dsw=${dsw%%-*}; dsw=${dsw^^};
 
@@ -74,13 +81,22 @@ for dsp in "$bids"/*; do
 
     echo "Working on $dsn"
 
-    echo "Adding label-canal_seg and label-SC_seg to label-spine_dseg"
-    totalspineseg_map_labels -m 1:2 -s "$bids"/$dsn/derivatives/labels_iso -o "$bids"/$dsn/derivatives/labels_iso  --update-segs-dir "$bids"/$dsn/derivatives/labels_iso --seg-suffix "_label-canal_seg" --output-seg-suffix "_label-spine_dseg" --update-seg-suffix "_label-spine_dseg" -p "sub-*/anat/" -r -w $JOBS
-    totalspineseg_map_labels -m 1:1 -s "$bids"/$dsn/derivatives/labels_iso -o "$bids"/$dsn/derivatives/labels_iso  --update-segs-dir "$bids"/$dsn/derivatives/labels_iso --seg-suffix "_label-SC_seg" --output-seg-suffix "_label-spine_dseg" --update-seg-suffix "_label-spine_dseg" -p "sub-*/anat/" -r -w $JOBS
+    if [ "$dsw" == "LDH" ]; then
+        echo "Copying LDH images and labels (skipping complex mapping)"
+        totalspineseg_cpdir "$bids"/$dsn "$nnUNet_raw"/$SRC_DATASET/imagesTr -p "sub-*/anat/sub-*.nii.gz" -f -t sub-:sub-${dsw} .nii.gz:_0000.nii.gz -r -w $JOBS
+        # Note: labels are already in 'labels_iso' with correct name suffix from conversion script
+        # Conversion script: sub-ID_T2w_label-spine_dseg.nii.gz
+        # We map to .nii.gz (matching image ID sub-LDHID_T2w)
+        totalspineseg_cpdir "$bids"/$dsn/derivatives/labels_iso "$nnUNet_raw"/$SRC_DATASET/labelsTr -p "sub-*/anat/sub-*_label-spine_dseg.nii.gz" -f -t sub-:sub-${dsw} _label-spine_dseg.nii.gz:.nii.gz -r -w $JOBS
+    else
+        echo "Adding label-canal_seg and label-SC_seg to label-spine_dseg"
+        totalspineseg_map_labels -m 1:2 -s "$bids"/$dsn/derivatives/labels_iso -o "$bids"/$dsn/derivatives/labels_iso  --update-segs-dir "$bids"/$dsn/derivatives/labels_iso --seg-suffix "_label-canal_seg" --output-seg-suffix "_label-spine_dseg" --update-seg-suffix "_label-spine_dseg" -p "sub-*/anat/" -r -w $JOBS
+        totalspineseg_map_labels -m 1:1 -s "$bids"/$dsn/derivatives/labels_iso -o "$bids"/$dsn/derivatives/labels_iso  --update-segs-dir "$bids"/$dsn/derivatives/labels_iso --seg-suffix "_label-SC_seg" --output-seg-suffix "_label-spine_dseg" --update-seg-suffix "_label-spine_dseg" -p "sub-*/anat/" -r -w $JOBS
 
-    echo "Copy images and labels into the nnUNet dataset folder"
-    totalspineseg_cpdir "$bids"/$dsn "$nnUNet_raw"/$SRC_DATASET/imagesTr -p "sub-*/anat/sub-*.nii.gz" -f -t sub-:sub-${dsw} .nii.gz:_0000.nii.gz -r -w $JOBS
-    totalspineseg_cpdir "$bids"/$dsn/derivatives/labels_iso "$nnUNet_raw"/$SRC_DATASET/labelsTr -p "sub-*/anat/sub-*_label-spine_dseg.nii.gz" -f -t sub-:sub-${dsw} _space-resampled_label-spine_dseg.nii.gz:.nii.gz -r -w $JOBS
+        echo "Copy images and labels into the nnUNet dataset folder"
+        totalspineseg_cpdir "$bids"/$dsn "$nnUNet_raw"/$SRC_DATASET/imagesTr -p "sub-*/anat/sub-*.nii.gz" -f -t sub-:sub-${dsw} .nii.gz:_0000.nii.gz -r -w $JOBS
+        totalspineseg_cpdir "$bids"/$dsn/derivatives/labels_iso "$nnUNet_raw"/$SRC_DATASET/labelsTr -p "sub-*/anat/sub-*_label-spine_dseg.nii.gz" -f -t sub-:sub-${dsw} _space-resampled_label-spine_dseg.nii.gz:.nii.gz -r -w $JOBS
+    fi
 done
 
 echo "Remove images withot segmentation and segmentation without images"
@@ -124,7 +140,7 @@ done
 
 if [ $NOAUG -eq 0 ]; then
     echo "Generate augmentations"
-    totalspineseg_augment -i "$nnUNet_raw"/$SRC_DATASET/imagesTr -s "$nnUNet_raw"/$SRC_DATASET/labelsTr -o "$nnUNet_raw"/Dataset100_TotalSpineSeg_Aug/imagesTr -g "$nnUNet_raw"/Dataset100_TotalSpineSeg_Aug/labelsTr --labels2image --seg-classes 1 2 11-50 63-100 -r -w $JOBS
+    totalspineseg_augment -i "$nnUNet_raw"/$SRC_DATASET/imagesTr -s "$nnUNet_raw"/$SRC_DATASET/labelsTr -o "$nnUNet_raw"/Dataset100_TotalSpineSeg_Aug/imagesTr -g "$nnUNet_raw"/Dataset100_TotalSpineSeg_Aug/labelsTr --labels2image --seg-classes 1 2 11-50 63-100 101 -r -w $JOBS
     totalspineseg_cpdir "$nnUNet_raw"/$SRC_DATASET "$nnUNet_raw"/Dataset100_TotalSpineSeg_Aug -p "*Ts/*.nii.gz" -r -w $JOBS
     totalspineseg_transform_seg2image -i "$nnUNet_raw"/Dataset100_TotalSpineSeg_Aug/imagesTr -s "$nnUNet_raw"/Dataset100_TotalSpineSeg_Aug/labelsTr -o "$nnUNet_raw"/Dataset100_TotalSpineSeg_Aug/labelsTr -r -w $JOBS
     SRC_DATASET=Dataset100_TotalSpineSeg_Aug
