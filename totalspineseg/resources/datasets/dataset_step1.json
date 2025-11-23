@@ -24,8 +24,7 @@
             8,
             9
         ],
-        "cord": 9,
-        "LDH": 10
+        "cord": 9
     },
     "regions_class_order": [
         1,
@@ -36,8 +35,7 @@
         6,
         7,
         8,
-        9,
-        10
+        9
     ],
     "numTraining": 0,
     "file_ending": ".nii.gz"

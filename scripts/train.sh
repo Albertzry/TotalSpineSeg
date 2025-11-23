@@ -136,6 +136,28 @@ for d in ${DATASETS[@]}; do
     # Get the dataset name
     d_name=$(basename "$(ls -d "$nnUNet_raw"/Dataset${d}_*)")
 
+    # If dataset is 102, we need to run the merge logic after Step 1 is done
+    # But wait, Step 1 training happens when d=101. 
+    # We should run the merge logic BEFORE d=102 training starts.
+    # Check if we are about to train 102
+    if [ "$d" -eq 102 ]; then
+        echo "Running LDH Label Merge for Dataset 102..."
+        # Only run if Step 1 output exists (basic check)
+        # Assuming Step 1 (101) was trained before this loop or in previous iteration
+        python3 scripts/merge_ldh_labels.py
+        
+        # After merging, we might need to verify preprocessing status?
+        # nnUNet checks fingerprint/plans/preprocessed. 
+        # If we modified labelsTr in raw, we need to re-preprocess or let nnUNet detect changes.
+        # nnUNetv2_preprocess re-runs if folders don't match or forced.
+        # Since we modified Raw labels, we should force preprocessing for 102 or remove existing preprocessed
+        
+        if [ -d "$nnUNet_preprocessed"/$d_name ]; then
+             echo "Removing existing preprocessed data for $d_name to force re-preprocessing with new labels..."
+             rm -rf "$nnUNet_preprocessed"/$d_name
+        fi
+    fi
+
     if [ ! -f "$nnUNet_preprocessed"/$d_name/dataset_fingerprint.json ]; then
         echo "Extracting fingerprint dataset $d_name (using $JOBSNN workers, max: $MAX_PARALLEL_JOBS)"
         # --verify_dataset_integrity not working in nnunetv2==2.4.2

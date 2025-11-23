@@ -151,6 +151,14 @@ if [ $PREP_101 -eq 1 ]; then
     totalspineseg_cpdir "$nnUNet_raw"/$SRC_DATASET "$nnUNet_raw"/Dataset101_TotalSpineSeg_step1 -p "imagesT*/*.nii.gz" -r -w $JOBS
     totalspineseg_map_labels -m "$resources"/labels_maps/nnunet_step1.json -s "$nnUNet_raw"/$SRC_DATASET/labelsTr -o "$nnUNet_raw"/Dataset101_TotalSpineSeg_step1/labelsTr -r -w $JOBS
     totalspineseg_map_labels -m "$resources"/labels_maps/nnunet_step1.json -s "$nnUNet_raw"/$SRC_DATASET/labelsTs -o "$nnUNet_raw"/Dataset101_TotalSpineSeg_step1/labelsTs -r -w $JOBS
+     
+    # Remove LDH data (sub-LDH*) from Dataset 101 to avoid training on incomplete labels
+    echo "Excluding LDH data from Dataset 101..."
+    find "$nnUNet_raw"/Dataset101_TotalSpineSeg_step1/imagesTr -name "sub-LDH*" -delete
+    find "$nnUNet_raw"/Dataset101_TotalSpineSeg_step1/labelsTr -name "sub-LDH*" -delete
+    find "$nnUNet_raw"/Dataset101_TotalSpineSeg_step1/imagesTs -name "sub-LDH*" -delete
+    find "$nnUNet_raw"/Dataset101_TotalSpineSeg_step1/labelsTs -name "sub-LDH*" -delete
+    
     # Copy the dataset.json file and update the number of training samples
     jq --arg numTraining "$(ls "$nnUNet_raw"/Dataset101_TotalSpineSeg_step1/labelsTr | wc -l)" '.numTraining = ($numTraining|tonumber)' "$resources"/datasets/dataset_step1.json > "$nnUNet_raw"/Dataset101_TotalSpineSeg_step1/dataset.json
 fi
