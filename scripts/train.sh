@@ -144,13 +144,17 @@ for d in ${DATASETS[@]}; do
         echo "Running LDH Label Merge for Dataset 102..."
         # Only run if Step 1 output exists (basic check)
         # Assuming Step 1 (101) was trained before this loop or in previous iteration
-        python3 scripts/merge_ldh_labels.py
+        python3 "$TOTALSPINESEG"/scripts/merge_ldh_labels.py
         
         # After merging, we might need to verify preprocessing status?
         # nnUNet checks fingerprint/plans/preprocessed. 
         # If we modified labelsTr in raw, we need to re-preprocess or let nnUNet detect changes.
         # nnUNetv2_preprocess re-runs if folders don't match or forced.
         # Since we modified Raw labels, we should force preprocessing for 102 or remove existing preprocessed
+        
+        # Fix Metadata mismatch for Dataset 102 (channel 0 vs channel 1)
+        echo "Fixing metadata mismatch for Dataset 102..."
+        python3 "$TOTALSPINESEG"/scripts/fix_metadata.py -d "$nnUNet_raw"/$d_name --no-backup
         
         if [ -d "$nnUNet_preprocessed"/$d_name ]; then
              echo "Removing existing preprocessed data for $d_name to force re-preprocessing with new labels..."

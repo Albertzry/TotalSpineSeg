@@ -63,8 +63,15 @@ def fix_metadata(image_0000_path, image_0001_path, overwrite=True):
     qform_code = int(img_0000.header['qform_code'])
     sform_code = int(img_0000.header['sform_code'])
     
+    # Instead of setting qform/sform with codes (which might trigger re-computation or slight shifts)
+    # We should copy the affine exactly and set the codes.
+    # However, nibabel sometimes tries to be smart.
+    # A safer way to "align" without resampling is to just overwrite the affine in the header.
+    
     fixed_img_0001.set_qform(ref_affine, code=qform_code)
     fixed_img_0001.set_sform(ref_affine, code=sform_code)
+    
+    # Double check: if nibabel re-calculated affine based on data shape? No, we passed ref_affine.
     
     # Save the fixed image
     if overwrite:
