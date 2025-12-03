@@ -1,179 +1,9 @@
 """
-Test script for PartialLDH custom loss and trainer.
-
-测试场景：
-1. Batch中有LDH样本：应该正常计算所有类别的loss
-2. Batch中没有LDH样本：应该忽略LDH通道的loss贡献
+Test script for PartialLDH custom trainer.
 """
 
 import torch
 import numpy as np
-
-
-def test_partial_ldh_loss():
-    """Test the PartialLDH_DC_and_CE_loss function."""
-    print("=" * 70)
-    print("Testing PartialLDH_DC_and_CE_loss...")
-    print("=" * 70)
-    
-    from nnunetv2.training.nnUNetTrainer.nnUNetTrainer_PartialLDH import (
-        PartialLDH_DC_and_CE_loss,
-        PartialLDH_SoftDiceLoss,
-        PartialLDH_CELoss
-    )
-    
-    # Setup
-    batch_size = 2
-    num_classes = 13  # 0-12, where 12 is LDH
-    spatial = (16, 16, 16)
-    ldh_class_idx = 12
-    
-    # Move to GPU if available
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
-    
-    # Create mock data directly on device
-    # Network Output (Logits): (B, C, D, H, W)
-    net_output = torch.randn(batch_size, num_classes, *spatial, requires_grad=True, device=device)
-    
-    # Ground Truth: (B, 1, D, H, W)
-    target = torch.zeros(batch_size, 1, *spatial, dtype=torch.float32, device=device)
-    
-    # Scenario setup:
-    # Sample 0: NO LDH (ordinary subject) - some spine structures
-    target[0, 0, 2:4, 2:4, 2:4] = 1  # disc
-    target[0, 0, 6:8, 6:8, 6:8] = 6  # vertebrae
-    
-    # Sample 1: HAS LDH (LDH subject) - spine structures + LDH
-    target[1, 0, 2:4, 2:4, 2:4] = 1  # disc
-    target[1, 0, 5:10, 5:10, 5:10] = 12  # LDH
-    
-    print("\n--- Input Shapes ---")
-    print(f"Network Output: {net_output.shape}")
-    print(f"Target: {target.shape}")
-    print(f"Sample 0 has LDH: {(target[0] == ldh_class_idx).any().item()}")
-    print(f"Sample 1 has LDH: {(target[1] == ldh_class_idx).any().item()}")
-    
-    # Test 1: Individual Components
-    print("\n--- Testing Individual Components ---")
-    
-    # Test Dice Loss
-    print("\n1. Testing PartialLDH_SoftDiceLoss...")
-    from nnunetv2.utilities.helpers import softmax_helper_dim1
-    dice_loss = PartialLDH_SoftDiceLoss(
-        apply_nonlin=softmax_helper_dim1,
-        batch_dice=False,
-        do_bg=False,
-        smooth=1e-5,
-        ddp=False,
-        ldh_class_idx=ldh_class_idx
-    )
-    
-    try:
-        with torch.no_grad():
-            dl = dice_loss(net_output, target)
-        print(f"   Dice Loss: {dl.item():.6f} ✓")
-    except Exception as e:
-        print(f"   Dice Loss FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    # Test CE Loss
-    print("\n2. Testing PartialLDH_CELoss...")
-    ce_loss = PartialLDH_CELoss(ldh_class_idx=ldh_class_idx)
-    
-    try:
-        with torch.no_grad():
-            cl = ce_loss(net_output, target[:, 0])
-        print(f"   CE Loss: {cl.item():.6f} ✓")
-    except Exception as e:
-        print(f"   CE Loss FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    # Test 2: Combined Loss
-    print("\n--- Testing Combined Loss ---")
-    
-    combined_loss = PartialLDH_DC_and_CE_loss(
-        soft_dice_kwargs={'batch_dice': False, 'smooth': 1e-5, 'do_bg': False, 'ddp': False},
-        ce_kwargs={},
-        weight_ce=1.0,
-        weight_dice=1.0,
-        ignore_label=None,
-        ldh_class_idx=ldh_class_idx
-    )
-    
-    try:
-        loss = combined_loss(net_output, target)
-        print(f"Combined Loss (forward): {loss.item():.6f} ✓")
-    except Exception as e:
-        print(f"Combined Loss FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-    
-    # Test 3: Backward Pass
-    print("\n--- Testing Backward Pass ---")
-    try:
-        loss.backward()
-        print("Backward pass successful ✓")
-        print(f"Gradient shape: {net_output.grad.shape}")
-        
-        # Check that gradients exist
-        grad_norm = net_output.grad.norm().item()
-        print(f"Gradient norm: {grad_norm:.6f}")
-        
-        if grad_norm > 0:
-            print("Gradients are non-zero ✓")
-        else:
-            print("WARNING: Gradients are zero!")
-            
-    except Exception as e:
-        print(f"Backward pass FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-    
-    # Test 4: Verify LDH handling
-    print("\n--- Verifying LDH Handling Logic ---")
-    
-    # Create a batch with ONLY non-LDH samples
-    target_no_ldh = torch.zeros(batch_size, 1, *spatial, dtype=torch.float32, device=device)
-    target_no_ldh[0, 0, 2:4, 2:4, 2:4] = 1
-    target_no_ldh[1, 0, 6:8, 6:8, 6:8] = 6
-    
-    net_output_2 = torch.randn(batch_size, num_classes, *spatial, requires_grad=True, device=device)
-    
-    print(f"All samples have LDH: {(target_no_ldh == ldh_class_idx).any().item()}")
-    
-    try:
-        loss_no_ldh = combined_loss(net_output_2, target_no_ldh)
-        print(f"Loss (no LDH batch): {loss_no_ldh.item():.6f} ✓")
-        
-        loss_no_ldh.backward()
-        grad_norm_no_ldh = net_output_2.grad.norm().item()
-        print(f"Gradient norm (no LDH): {grad_norm_no_ldh:.6f}")
-        
-        # The LDH channel should have reduced gradient contribution
-        ldh_grad = net_output_2.grad[:, ldh_class_idx].abs().mean().item()
-        other_grad = net_output_2.grad[:, 1:ldh_class_idx].abs().mean().item()
-        print(f"LDH channel grad (should be small): {ldh_grad:.8f}")
-        print(f"Other channels grad: {other_grad:.8f}")
-        
-        if ldh_grad < other_grad * 0.1:  # LDH grad should be much smaller
-            print("LDH channel gradient is properly reduced ✓")
-        else:
-            print("Note: LDH gradients may still flow through softmax interactions")
-            
-    except Exception as e:
-        print(f"No LDH batch test FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    print("\n" + "=" * 70)
-    print("All tests completed!")
-    print("=" * 70)
-    return True
 
 
 def test_trainer_import():
@@ -185,10 +15,14 @@ def test_trainer_import():
     try:
         from nnunetv2.training.nnUNetTrainer.nnUNetTrainer_PartialLDH import (
             nnUNetTrainer_PartialLDH,
-            nnUNetTrainer_PartialLDH_OnlyLDHUpdate
+            PartialLDH_Loss,
+            TverskyLoss,
+            create_disc_attention_mask
         )
         print("nnUNetTrainer_PartialLDH imported successfully ✓")
-        print("nnUNetTrainer_PartialLDH_OnlyLDHUpdate imported successfully ✓")
+        print("PartialLDH_Loss imported successfully ✓")
+        print("TverskyLoss imported successfully ✓")
+        print("create_disc_attention_mask imported successfully ✓")
         return True
     except Exception as e:
         print(f"Import FAILED: {e}")
@@ -197,13 +31,207 @@ def test_trainer_import():
         return False
 
 
+def test_partial_ldh_loss():
+    """Test the PartialLDH_Loss function."""
+    print("\n" + "=" * 70)
+    print("Testing PartialLDH_Loss...")
+    print("=" * 70)
+    
+    from nnunetv2.training.nnUNetTrainer.nnUNetTrainer_PartialLDH import PartialLDH_Loss
+    
+    batch_size = 2
+    num_classes = 13
+    spatial = (16, 16, 16)
+    ldh_class_idx = 12
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    # Create mock data
+    net_output = torch.randn(batch_size, num_classes, *spatial, requires_grad=True, device=device)
+    target = torch.zeros(batch_size, 1, *spatial, dtype=torch.float32, device=device)
+    
+    # Sample 0: NO LDH
+    target[0, 0, 2:4, 2:4, 2:4] = 1
+    target[0, 0, 6:8, 6:8, 6:8] = 6
+    
+    # Sample 1: HAS LDH (small region)
+    target[1, 0, 2:4, 2:4, 2:4] = 1
+    target[1, 0, 7:9, 7:9, 7:9] = ldh_class_idx
+    
+    print(f"\nSample 0 has LDH: {(target[0] == ldh_class_idx).any().item()}")
+    print(f"Sample 1 has LDH: {(target[1] == ldh_class_idx).any().item()}")
+    print(f"LDH voxels in sample 1: {(target[1] == ldh_class_idx).sum().item()}")
+    
+    # Create loss
+    loss_fn = PartialLDH_Loss(
+        soft_dice_kwargs={'batch_dice': False, 'smooth': 1e-5, 'do_bg': False},
+        ce_kwargs={},
+        weight_ce=1.0,
+        weight_dice=1.0,
+        weight_tversky=0.5,
+        weight_focal=0.5,
+        ldh_class_idx=ldh_class_idx,
+        ldh_class_weight=3.0,
+        tversky_alpha=0.3,
+        tversky_beta=0.7,
+        focal_gamma=2.0
+    )
+    
+    # Forward
+    print("\n--- Forward Pass ---")
+    try:
+        loss = loss_fn(net_output, target)
+        print(f"Loss value: {loss.item():.6f} ✓")
+    except Exception as e:
+        print(f"Forward FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    # Backward
+    print("\n--- Backward Pass ---")
+    try:
+        loss.backward()
+        grad_norm = net_output.grad.norm().item()
+        print(f"Gradient norm: {grad_norm:.6f} ✓")
+        
+        # Check LDH gradient handling
+        ldh_grad_s0 = net_output.grad[0, ldh_class_idx].abs().mean().item()
+        ldh_grad_s1 = net_output.grad[1, ldh_class_idx].abs().mean().item()
+        print(f"Sample 0 (no LDH) - LDH channel grad: {ldh_grad_s0:.8f}")
+        print(f"Sample 1 (has LDH) - LDH channel grad: {ldh_grad_s1:.8f}")
+        
+        if ldh_grad_s0 < ldh_grad_s1:
+            print("LDH gradient properly reduced for sample without LDH ✓")
+        
+    except Exception as e:
+        print(f"Backward FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    # Test with batch without any LDH
+    print("\n--- Testing batch without LDH ---")
+    net_output2 = torch.randn(batch_size, num_classes, *spatial, requires_grad=True, device=device)
+    target_no_ldh = torch.zeros(batch_size, 1, *spatial, dtype=torch.float32, device=device)
+    target_no_ldh[0, 0, 2:4, 2:4, 2:4] = 1
+    target_no_ldh[1, 0, 6:8, 6:8, 6:8] = 6
+    
+    try:
+        loss2 = loss_fn(net_output2, target_no_ldh)
+        print(f"Loss (no LDH batch): {loss2.item():.6f} ✓")
+        
+        loss2.backward()
+        ldh_grad = net_output2.grad[:, ldh_class_idx].abs().mean().item()
+        print(f"LDH channel grad (should be ~0): {ldh_grad:.10f}")
+        
+        if ldh_grad < 1e-5:
+            print("LDH gradient properly zeroed for batch without LDH ✓")
+        
+    except Exception as e:
+        print(f"No LDH batch test FAILED: {e}")
+        return False
+    
+    return True
+
+
+def test_anatomical_attention():
+    """Test anatomical attention based on disc location."""
+    print("\n" + "=" * 70)
+    print("Testing Anatomical Attention...")
+    print("=" * 70)
+    
+    from nnunetv2.training.nnUNetTrainer.nnUNetTrainer_PartialLDH import (
+        create_disc_attention_mask, PartialLDH_Loss
+    )
+    
+    batch_size = 2
+    num_classes = 13
+    spatial = (16, 16, 16)
+    ldh_class_idx = 12
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Create target with disc and LDH
+    target = torch.zeros(batch_size, 1, *spatial, dtype=torch.float32, device=device)
+    
+    # Add disc structures (class 1-5)
+    target[0, 0, 5:8, 5:8, 5:8] = 1  # disc
+    target[1, 0, 7:10, 7:10, 7:10] = 3  # disc_C7_T1
+    
+    # Add LDH near disc in sample 1
+    target[1, 0, 8:10, 8:10, 10:12] = ldh_class_idx  # LDH adjacent to disc
+    
+    # Test disc attention mask creation
+    print("\n1. Testing create_disc_attention_mask...")
+    try:
+        attention_mask = create_disc_attention_mask(target, disc_classes=(1, 2, 3, 4, 5), dilation_radius=3)
+        print(f"   Attention mask shape: {attention_mask.shape} ✓")
+        print(f"   Disc voxels: {(target[0] == 1).sum().item()}")
+        print(f"   Attention region voxels (after dilation): {(attention_mask[0] > 0).sum().item()}")
+        
+        # Check that LDH location is within attention region
+        ldh_in_attention = (attention_mask[1, 0, 8:10, 8:10, 10:12] > 0).all().item()
+        print(f"   LDH location within attention region: {ldh_in_attention} ✓")
+    except Exception as e:
+        print(f"   Attention mask creation FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    # Test loss with anatomical attention
+    print("\n2. Testing Loss with Anatomical Attention...")
+    net_output = torch.randn(batch_size, num_classes, *spatial, requires_grad=True, device=device)
+    
+    loss_fn = PartialLDH_Loss(
+        soft_dice_kwargs={'batch_dice': False, 'smooth': 1e-5, 'do_bg': False},
+        ce_kwargs={},
+        ldh_class_idx=ldh_class_idx,
+        use_anatomical_attention=True,
+        disc_classes=(1, 2, 3, 4, 5),
+        attention_dilation=3,
+        outside_disc_penalty=2.0
+    )
+    
+    try:
+        loss = loss_fn(net_output, target)
+        print(f"   Loss with attention: {loss.item():.6f} ✓")
+        
+        loss.backward()
+        print("   Backward pass successful ✓")
+    except Exception as e:
+        print(f"   Loss computation FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    # Compare with loss without anatomical attention
+    print("\n3. Comparing with/without Anatomical Attention...")
+    net_output2 = torch.randn(batch_size, num_classes, *spatial, requires_grad=True, device=device)
+    
+    loss_fn_no_attn = PartialLDH_Loss(
+        soft_dice_kwargs={'batch_dice': False, 'smooth': 1e-5, 'do_bg': False},
+        ce_kwargs={},
+        ldh_class_idx=ldh_class_idx,
+        use_anatomical_attention=False
+    )
+    
+    loss_no_attn = loss_fn_no_attn(net_output2, target)
+    print(f"   Loss without attention: {loss_no_attn.item():.6f}")
+    print("   (With attention adds penalty for LDH predictions outside disc region)")
+    
+    print("\nAnatomical Attention tests completed ✓")
+    return True
+
+
 def test_deep_supervision():
     """Test loss with deep supervision wrapper."""
     print("\n" + "=" * 70)
-    print("Testing Deep Supervision Wrapper...")
+    print("Testing Deep Supervision...")
     print("=" * 70)
     
-    from nnunetv2.training.nnUNetTrainer.nnUNetTrainer_PartialLDH import PartialLDH_DC_and_CE_loss
+    from nnunetv2.training.nnUNetTrainer.nnUNetTrainer_PartialLDH import PartialLDH_Loss
     from nnunetv2.training.loss.deep_supervision import DeepSupervisionWrapper
     
     batch_size = 2
@@ -212,31 +240,23 @@ def test_deep_supervision():
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # Base loss
-    loss = PartialLDH_DC_and_CE_loss(
-        soft_dice_kwargs={'batch_dice': False, 'smooth': 1e-5, 'do_bg': False, 'ddp': False},
+    loss = PartialLDH_Loss(
+        soft_dice_kwargs={'batch_dice': False, 'smooth': 1e-5, 'do_bg': False},
         ce_kwargs={},
-        weight_ce=1.0,
-        weight_dice=1.0,
-        ignore_label=None,
         ldh_class_idx=ldh_class_idx
     )
     
-    # Wrap with deep supervision
     weights = np.array([1.0, 0.5, 0.25, 0.125, 0])
     weights = weights / weights.sum()
     ds_loss = DeepSupervisionWrapper(loss, weights)
     
-    # Create multi-scale outputs (like deep supervision)
     outputs = []
     targets = []
-    
     spatial_sizes = [(16, 16, 16), (8, 8, 8), (4, 4, 4), (2, 2, 2), (1, 1, 1)]
     
     for spatial in spatial_sizes:
         out = torch.randn(batch_size, num_classes, *spatial, requires_grad=True, device=device)
         tgt = torch.zeros(batch_size, 1, *spatial, dtype=torch.float32, device=device)
-        # Add some LDH to second sample
         if spatial[0] >= 4:
             tgt[1, 0, 1:min(3, spatial[0]), 1:min(3, spatial[1]), 1:min(3, spatial[2])] = ldh_class_idx
         outputs.append(out)
@@ -247,7 +267,7 @@ def test_deep_supervision():
         print(f"Deep Supervision Loss: {total_loss.item():.6f} ✓")
         
         total_loss.backward()
-        print("Backward pass with deep supervision successful ✓")
+        print("Backward pass successful ✓")
         return True
     except Exception as e:
         print(f"Deep supervision test FAILED: {e}")
@@ -258,13 +278,13 @@ def test_deep_supervision():
 
 if __name__ == "__main__":
     print("\n" + "#" * 70)
-    print("#  TotalSpineSeg - Custom Trainer Test Suite")
+    print("#  TotalSpineSeg - PartialLDH Trainer Test")
     print("#" * 70 + "\n")
     
     success = True
-    
     success &= test_trainer_import()
     success &= test_partial_ldh_loss()
+    success &= test_anatomical_attention()
     success &= test_deep_supervision()
     
     print("\n" + "#" * 70)

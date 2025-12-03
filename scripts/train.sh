@@ -93,7 +93,15 @@ export nnUNet_exports="$TOTALSPINESEG_DATA"/nnUNet/exports
 
 # Default trainers for each step
 # Step 1 (Dataset 101): Standard trainer
-# Step 2 (Dataset 102): Custom partial LDH trainer to handle missing LDH labels
+# Step 2 (Dataset 102): Custom partial LDH trainer with optimizations for small structures
+#
+# nnUNetTrainer_PartialLDH 包含以下优化:
+#   - Partial Label Handling (忽略无LDH样本的LDH loss)
+#   - LDH Class Weight: 3.0x
+#   - Tversky Loss (alpha=0.3, beta=0.7) - 高recall
+#   - Focal Loss (gamma=2.0) - 类别平衡
+#   - Foreground Oversampling: 50%
+#
 nnUNetTrainer_Step1=${3:-nnUNetTrainer_DASegOrd0_NoMirroring}
 nnUNetTrainer_Step2=${3:-nnUNetTrainer_PartialLDH}
 
