@@ -160,28 +160,45 @@ for d in ${DATASETS[@]}; do
     fi
 
     # If dataset is 102, we need to run the merge logic after Step 1 is done
-    # But wait, Step 1 training happens when d=101. 
-    # We should run the merge logic BEFORE d=102 training starts.
-    # Check if we are about to train 102
     if [ "$d" -eq 102 ]; then
-        echo "Running LDH Label Merge for Dataset 102..."
-        # Only run if Step 1 output exists (basic check)
-        # Assuming Step 1 (101) was trained before this loop or in previous iteration
-        python3 "$TOTALSPINESEG"/scripts/merge_ldh_labels.py
+        # 检查是否需要重新merge（基于时间戳或标记文件）
+        MERGE_MARKER="$nnUNet_raw"/$d_name/.merge_complete
+        NEED_REPROCESS=false
         
-        # After merging, we might need to verify preprocessing status?
-        # nnUNet checks fingerprint/plans/preprocessed. 
-        # If we modified labelsTr in raw, we need to re-preprocess or let nnUNet detect changes.
-        # nnUNetv2_preprocess re-runs if folders don't match or forced.
-        # Since we modified Raw labels, we should force preprocessing for 102 or remove existing preprocessed
+        # 检查Step1模型是否存在
+        STEP1_MODEL="$nnUNet_results/Dataset101_TotalSpineSeg_step1/${nnUNetTrainer_Step1}__${nnUNetPlans}__${configuration}/fold_${FOLD}/checkpoint_final.pth"
+        if [ ! -f "$STEP1_MODEL" ]; then
+            echo "Warning: Step 1 model not found at $STEP1_MODEL"
+            echo "Please train Dataset 101 first."
+        fi
         
-        # Fix Metadata mismatch for Dataset 102 (channel 0 vs channel 1)
-        echo "Fixing metadata mismatch for Dataset 102..."
-        python3 "$TOTALSPINESEG"/scripts/fix_metadata.py -d "$nnUNet_raw"/$d_name --no-backup
+        # 只有在需要时才运行merge
+        if [ ! -f "$MERGE_MARKER" ]; then
+            echo "Running LDH Label Merge for Dataset 102..."
+            python3 "$TOTALSPINESEG"/scripts/merge_ldh_labels.py
+            
+            # 标记merge完成
+            touch "$MERGE_MARKER"
+            NEED_REPROCESS=true
+        else
+            echo "LDH merge already completed (found marker file), skipping..."
+        fi
         
-        if [ -d "$nnUNet_preprocessed"/$d_name ]; then
-             echo "Removing existing preprocessed data for $d_name to force re-preprocessing with new labels..."
-             rm -rf "$nnUNet_preprocessed"/$d_name
+        # 只在首次或有变化时修复元数据
+        METADATA_MARKER="$nnUNet_raw"/$d_name/.metadata_fixed
+        if [ ! -f "$METADATA_MARKER" ]; then
+            echo "Fixing metadata mismatch for Dataset 102..."
+            python3 "$TOTALSPINESEG"/scripts/fix_metadata.py -d "$nnUNet_raw"/$d_name --no-backup
+            touch "$METADATA_MARKER"
+            NEED_REPROCESS=true
+        else
+            echo "Metadata already fixed, skipping..."
+        fi
+        
+        # 只在需要时删除预处理数据
+        if [ "$NEED_REPROCESS" = true ] && [ -d "$nnUNet_preprocessed"/$d_name ]; then
+            echo "Removing existing preprocessed data for $d_name to force re-preprocessing with new labels..."
+            rm -rf "$nnUNet_preprocessed"/$d_name
         fi
     fi
 

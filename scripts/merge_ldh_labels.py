@@ -1,3 +1,12 @@
+"""
+Merge LDH labels with Step 1 predictions for Dataset 102.
+
+优化措施：
+1. 检查是否已有预测结果，跳过重复推理
+2. 批量推理而不是逐个处理
+3. 并行处理合并操作
+"""
+
 import os
 import glob
 import torch
@@ -6,11 +15,11 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing
 
 # Configuration
-# TOTALSPINESEG_DATA should be set in environment or passed via train.sh
 if 'TOTALSPINESEG_DATA' not in os.environ:
-    # Fallback or error
     print("Error: TOTALSPINESEG_DATA environment variable not set.")
     exit(1)
 
@@ -27,13 +36,42 @@ DATASET_ID = 101
 TRAINER = "nnUNetTrainer_DASegOrd0_NoMirroring"
 PLANS = "nnUNetPlans_small"
 CONFIG = "3d_fullres"
-FOLD = 0 # Assume fold 0 for inference
+FOLD = 0
+
+
+def merge_single_case(args):
+    """合并单个case的预测和GT标签"""
+    pred_path, gt_path, output_path = args
+    
+    try:
+        pred_nii = nib.load(pred_path)
+        pred_data = pred_nii.get_fdata().astype(np.int32)
+        
+        gt_nii = nib.load(gt_path)
+        gt_data = gt_nii.get_fdata().astype(np.int32)
+        
+        # Merge: Step1预测 + LDH GT
+        final_data = pred_data.copy()
+        ldh_mask = (gt_data == 101)
+        final_data[ldh_mask] = 12
+        
+        out_nii = nib.Nifti1Image(final_data, pred_nii.affine, pred_nii.header)
+        nib.save(out_nii, output_path)
+        
+        return True, str(output_path)
+    except Exception as e:
+        return False, f"{output_path}: {e}"
+
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    
+    # 获取CPU数量用于并行
+    num_workers = min(multiprocessing.cpu_count(), 12)
+    print(f"Using {num_workers} workers for parallel processing")
 
-    # 1. Identify LDH files
+    # 1. 查找LDH图像
     ldh_images = sorted(glob.glob(str(DATASET_LDH_IMAGES / "sub-LDH*_0000.nii.gz")))
     print(f"Found {len(ldh_images)} LDH images to process.")
 
@@ -41,106 +79,122 @@ def main():
         print("No LDH images found. Check paths.")
         return
 
-    # Temporary output for Step 1 predictions
+    # 预测输出目录
     temp_pred_dir = Path("temp_step1_preds_ldh")
-    os.makedirs(temp_pred_dir, exist_ok=True)
-    
-    # 2. Run Step 1 Inference on LDH images using CLI
-    print("Running Step 1 inference on LDH images via nnUNet CLI...")
-    
-    # Create temp input dir with symlinks
     temp_input_dir = Path("temp_ldh_input")
-    if temp_input_dir.exists():
-        import shutil
-        shutil.rmtree(temp_input_dir)
-    os.makedirs(temp_input_dir)
     
+    # 2. 检查是否需要运行推理
+    need_inference = False
     for img in ldh_images:
-        dst = temp_input_dir / os.path.basename(img)
-        if not dst.exists():
-            os.symlink(img, dst)
+        fname = os.path.basename(img)
+        base_name = fname.replace("_0000.nii.gz", "")
+        label_name = base_name + ".nii.gz"
+        pred_path = temp_pred_dir / label_name
         
-    # Construct CLI command
-    # nnUNetv2_predict -i INPUT_FOLDER -o OUTPUT_FOLDER -d DATASET_NAME_OR_ID -c CONFIGURATION --save_probabilities
-    cmd = [
-        "nnUNetv2_predict",
-        "-d", str(DATASET_ID),
-        "-i", str(temp_input_dir),
-        "-o", str(temp_pred_dir),
-        "-f", str(FOLD),
-        "-c", CONFIG,
-        "-tr", TRAINER,
-        "-p", PLANS,
-        "-device", device.type
-    ]
+        if not pred_path.exists():
+            need_inference = True
+            break
     
-    print(f"Executing: {' '.join(cmd)}")
-    subprocess.check_call(cmd)
+    if need_inference:
+        print("Running Step 1 inference on LDH images...")
+        
+        # 创建输入目录
+        if temp_input_dir.exists():
+            import shutil
+            shutil.rmtree(temp_input_dir)
+        os.makedirs(temp_input_dir)
+        os.makedirs(temp_pred_dir, exist_ok=True)
+        
+        # 只链接需要预测的图像
+        images_to_predict = []
+        for img in ldh_images:
+            fname = os.path.basename(img)
+            base_name = fname.replace("_0000.nii.gz", "")
+            label_name = base_name + ".nii.gz"
+            pred_path = temp_pred_dir / label_name
+            
+            if not pred_path.exists():
+                dst = temp_input_dir / fname
+                if not dst.exists():
+                    os.symlink(img, dst)
+                images_to_predict.append(img)
+        
+        if images_to_predict:
+            print(f"Need to predict {len(images_to_predict)} images (skipping already predicted)")
+            
+            # 使用nnUNet批量推理
+            cmd = [
+                "nnUNetv2_predict",
+                "-d", str(DATASET_ID),
+                "-i", str(temp_input_dir),
+                "-o", str(temp_pred_dir),
+                "-f", str(FOLD),
+                "-c", CONFIG,
+                "-tr", TRAINER,
+                "-p", PLANS,
+                "-device", device.type
+            ]
+            
+            print(f"Executing: {' '.join(cmd)}")
+            subprocess.check_call(cmd)
+        else:
+            print("All predictions already exist, skipping inference.")
+    else:
+        print("All Step 1 predictions already exist, skipping inference step.")
     
-    # 3. Merge Labels
+    # 3. 并行合并标签
     print("Merging Step 1 predictions with Ground Truth LDH labels...")
-    
-    # Ensure output dir exists
     os.makedirs(DATASET_102_LABELS_TR, exist_ok=True)
     
-    for img_path in tqdm(ldh_images):
+    # 准备合并任务
+    merge_tasks = []
+    skipped = 0
+    
+    for img_path in ldh_images:
         fname = os.path.basename(img_path)
-        # Predictor outputs file with same name as input (including _0000 if present? No, usually removes it or keeps base)
-        # nnUNetv2_predict behavior: if input is case_0000.nii.gz, output is case.nii.gz
-        
         base_name = fname.replace("_0000.nii.gz", "")
         label_name = base_name + ".nii.gz"
         
-        # Prediction Path
         pred_path = temp_pred_dir / label_name
+        gt_path = DATASET_LDH_LABELS / label_name
+        output_path = DATASET_102_LABELS_TR / label_name
         
-        # GT Path (Dataset99 labels)
-        # Dataset99 label name: sub-LDH..._T2w.nii.gz (without _0000)
-        # The image file was sub-LDH..._T2w_0000.nii.gz
-        gt_path = DATASET_LDH_LABELS / label_name 
-        
+        # 跳过已存在的输出
+        if output_path.exists():
+            skipped += 1
+            continue
+            
         if not pred_path.exists():
-            print(f"Warning: Prediction not found for {label_name} at {pred_path}")
+            print(f"Warning: Prediction not found for {label_name}")
             continue
             
         if not gt_path.exists():
-            print(f"Warning: GT label not found for {label_name} at {gt_path}")
-            continue
-            
-        # Load
-        try:
-            pred_nii = nib.load(pred_path)
-            pred_data = pred_nii.get_fdata().astype(np.int32)
-            
-            gt_nii = nib.load(gt_path)
-            gt_data = gt_nii.get_fdata().astype(np.int32)
-        except Exception as e:
-            print(f"Error loading files for {label_name}: {e}")
+            print(f"Warning: GT label not found for {label_name}")
             continue
         
-        # Merge Logic
-        # Background: 0
-        # Step 1 Predictions (Spine): Keep as is (1-9)
-        # GT LDH (101): Map to 12
-        
-        final_data = pred_data.copy()
-        
-        # Map GT LDH (101) to 12
-        # Note: If GT has other labels, they might be overwritten or ignored based on this logic.
-        # Assuming data-ldh only has 101.
-        ldh_mask = (gt_data == 101)
-        final_data[ldh_mask] = 12
-        
-        # Save to Dataset 102 Labels
-        out_nii = nib.Nifti1Image(final_data, pred_nii.affine, pred_nii.header)
-        nib.save(out_nii, DATASET_102_LABELS_TR / label_name)
-
-    print("Merge complete.")
+        merge_tasks.append((str(pred_path), str(gt_path), str(output_path)))
     
-    # Cleanup
-    # import shutil
-    # shutil.rmtree(temp_input_dir)
-    # shutil.rmtree(temp_pred_dir)
+    if skipped > 0:
+        print(f"Skipped {skipped} already merged files")
+    
+    if merge_tasks:
+        print(f"Merging {len(merge_tasks)} files in parallel...")
+        
+        # 并行处理
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(merge_single_case, task): task for task in merge_tasks}
+            
+            with tqdm(total=len(merge_tasks), desc="Merging") as pbar:
+                for future in as_completed(futures):
+                    success, msg = future.result()
+                    if not success:
+                        print(f"Error: {msg}")
+                    pbar.update(1)
+    else:
+        print("All files already merged.")
+    
+    print("Merge complete.")
+
 
 if __name__ == "__main__":
     main()
