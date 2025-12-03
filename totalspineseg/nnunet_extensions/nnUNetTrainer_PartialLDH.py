@@ -97,6 +97,8 @@ class TverskyLoss(nn.Module):
     
     def forward(self, x: torch.Tensor, y: torch.Tensor,
                 loss_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # 转换为float32以避免fp16溢出
+        x = x.float()
         if self.apply_nonlin is not None:
             x = self.apply_nonlin(x)
         
@@ -107,9 +109,9 @@ class TverskyLoss(nn.Module):
                 y = y.view((y.shape[0], 1, *y.shape[1:]))
             
             if x.shape == y.shape:
-                y_onehot = y
+                y_onehot = y.float()
             else:
-                y_onehot = torch.zeros(x.shape, device=x.device, dtype=torch.bool)
+                y_onehot = torch.zeros(x.shape, device=x.device, dtype=torch.float32)
                 y_onehot.scatter_(1, y.long(), 1)
             
             if not self.do_bg:
@@ -119,15 +121,16 @@ class TverskyLoss(nn.Module):
             x = x[:, 1:]
         
         if loss_mask is not None:
+            loss_mask = loss_mask.float()
             tp = (x * y_onehot * loss_mask).sum(axes)
-            fp = (x * (1 - y_onehot.float()) * loss_mask).sum(axes)
+            fp = (x * (1 - y_onehot) * loss_mask).sum(axes)
             fn = ((1 - x) * y_onehot * loss_mask).sum(axes)
         else:
             tp = (x * y_onehot).sum(axes)
-            fp = (x * (1 - y_onehot.float())).sum(axes)
+            fp = (x * (1 - y_onehot)).sum(axes)
             fn = ((1 - x) * y_onehot).sum(axes)
         
-        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+        tversky = (tp + self.smooth) / (torch.clamp(tp + self.alpha * fp + self.beta * fn + self.smooth, min=1e-8))
         return (1 - tversky).mean()
 
 
@@ -254,7 +257,8 @@ class PartialLDH_Loss(nn.Module):
     def _compute_partial_dice(self, x: torch.Tensor, y: torch.Tensor,
                                has_ldh: torch.Tensor, loss_mask: Optional[torch.Tensor]) -> torch.Tensor:
         """计算带partial label处理和LDH权重的Dice Loss"""
-        x = softmax_helper_dim1(x)
+        # 转换为float32以避免fp16溢出
+        x = softmax_helper_dim1(x.float())
         batch_size = x.shape[0]
         axes = tuple(range(2, x.ndim))
         
@@ -262,13 +266,18 @@ class PartialLDH_Loss(nn.Module):
             if x.ndim != y.ndim:
                 y = y.view((y.shape[0], 1, *y.shape[1:]))
             
-            y_onehot = torch.zeros(x.shape, device=x.device, dtype=torch.bool)
+            # 使用float32类型以确保数值稳定性
+            y_onehot = torch.zeros(x.shape, device=x.device, dtype=torch.float32)
             y_onehot.scatter_(1, y.long(), 1)
             
             if not self.do_bg:
                 y_onehot = y_onehot[:, 1:]
             
-            sum_gt = y_onehot.sum(axes) if loss_mask is None else (y_onehot * loss_mask).sum(axes)
+            if loss_mask is not None:
+                loss_mask_float = loss_mask.float()
+                sum_gt = (y_onehot * loss_mask_float).sum(axes)
+            else:
+                sum_gt = y_onehot.sum(axes)
         
         if not self.do_bg:
             x = x[:, 1:]
@@ -277,8 +286,8 @@ class PartialLDH_Loss(nn.Module):
             intersect = (x * y_onehot).sum(axes)
             sum_pred = x.sum(axes)
         else:
-            intersect = (x * y_onehot * loss_mask).sum(axes)
-            sum_pred = (x * loss_mask).sum(axes)
+            intersect = (x * y_onehot * loss_mask_float).sum(axes)
+            sum_pred = (x * loss_mask_float).sum(axes)
         
         dc = (2 * intersect + self.smooth) / (torch.clip(sum_gt + sum_pred + self.smooth, 1e-8))
         
@@ -289,13 +298,16 @@ class PartialLDH_Loss(nn.Module):
             class_weights = torch.ones_like(dc)
             # 有LDH的样本：LDH通道权重=ldh_class_weight
             # 没有LDH的样本：LDH通道权重=0（忽略）
-            class_weights[:, ldh_idx] = torch.where(
+            ldh_weight_values = torch.where(
                 has_ldh,
-                torch.full((batch_size,), self.ldh_class_weight, device=dc.device),
-                torch.zeros(batch_size, device=dc.device)
+                torch.full((batch_size,), self.ldh_class_weight, device=dc.device, dtype=dc.dtype),
+                torch.zeros(batch_size, device=dc.device, dtype=dc.dtype)
             )
+            class_weights[:, ldh_idx] = ldh_weight_values
             
             valid_weights = class_weights.sum(dim=1, keepdim=True)
+            # 避免除零
+            valid_weights = torch.clamp(valid_weights, min=1e-8)
             weighted_dc = (dc * class_weights).sum(dim=1) / valid_weights.squeeze(1)
             return -weighted_dc.mean()
         
@@ -307,9 +319,10 @@ class PartialLDH_Loss(nn.Module):
         x_modified = x.clone()
         
         # 对没有LDH标签的样本，将LDH logits设为极负值
+        # 注意：使用 -1e4 而不是 -1e6，因为 fp16 的范围约为 ±65504
         for b in range(batch_size):
             if not has_ldh[b]:
-                x_modified[b, self.ldh_class_idx] = -1e6
+                x_modified[b, self.ldh_class_idx] = -1e4
         
         loss = F.cross_entropy(x_modified, y.long(), ignore_index=self.ignore_index, reduction='mean')
         return loss
@@ -322,19 +335,26 @@ class PartialLDH_Loss(nn.Module):
         在椎间盘附近区域：正常计算focal loss
         在椎间盘区域外：增加对LDH预测的惩罚
         """
-        probs = F.softmax(logits, dim=1)
+        # 使用float32计算以避免fp16溢出
+        logits_fp32 = logits.float()
+        probs = F.softmax(logits_fp32, dim=1)
         ldh_probs = probs[:, self.ldh_class_idx]
         ldh_target = (target == self.ldh_class_idx).float()
         
         alpha = 0.75
         gamma = self.focal_gamma
-        p = torch.clamp(ldh_probs, 1e-7, 1 - 1e-7)
+        # 使用更安全的clamp范围
+        p = torch.clamp(ldh_probs, 1e-6, 1 - 1e-6)
         
         focal_weight_pos = alpha * ((1 - p) ** gamma)
         focal_weight_neg = (1 - alpha) * (p ** gamma)
         
-        bce_pos = -ldh_target * focal_weight_pos * torch.log(p)
-        bce_neg = -(1 - ldh_target) * focal_weight_neg * torch.log(1 - p)
+        # 使用clamp限制log的输出范围，避免极端值
+        log_p = torch.clamp(torch.log(p), min=-100)
+        log_1_minus_p = torch.clamp(torch.log(1 - p), min=-100)
+        
+        bce_pos = -ldh_target * focal_weight_pos * log_p
+        bce_neg = -(1 - ldh_target) * focal_weight_neg * log_1_minus_p
         
         focal_loss = bce_pos + bce_neg
         
@@ -361,11 +381,13 @@ class PartialLDH_Loss(nn.Module):
         
         这个loss鼓励网络只在合理的解剖位置（椎间盘附近）预测LDH
         """
-        probs = F.softmax(net_output, dim=1)
+        # 使用float32计算以避免fp16溢出
+        net_output_fp32 = net_output.float()
+        probs = F.softmax(net_output_fp32, dim=1)
         ldh_probs = probs[:, self.ldh_class_idx]  # (B, D, H, W)
         
         # disc_attention: (B, 1, D, H, W) -> (B, D, H, W)
-        disc_attn = disc_attention.squeeze(1)
+        disc_attn = disc_attention.squeeze(1).float()
         
         # 在椎间盘区域外（disc_attn=0）预测LDH的概率应该被惩罚
         outside_disc_mask = (1 - disc_attn)  # 椎间盘区域外=1
@@ -398,20 +420,6 @@ class nnUNetTrainer_PartialLDH(nnUNetTrainer_DASegOrd0_NoMirroring):
         
         # 提高前景采样比例，增加LDH样本出现概率
         self.oversample_foreground_percent = 0.5
-        
-        self.print_to_log_file("")
-        self.print_to_log_file("=" * 70)
-        self.print_to_log_file("  nnUNetTrainer_PartialLDH - LDH小结构优化")
-        self.print_to_log_file("=" * 70)
-        self.print_to_log_file("  优化措施:")
-        self.print_to_log_file("    1. Partial Label Handling (忽略无LDH样本的LDH loss)")
-        self.print_to_log_file("    2. LDH Class Weight: 3.0x")
-        self.print_to_log_file("    3. Tversky Loss (alpha=0.3, beta=0.7) - 高recall")
-        self.print_to_log_file("    4. Focal Loss (gamma=2.0) - 类别平衡")
-        self.print_to_log_file("    5. Foreground Oversampling: 50%")
-        self.print_to_log_file("    6. Anatomical Attention (椎间盘区域引导，膨胀半径=5)")
-        self.print_to_log_file("=" * 70)
-        self.print_to_log_file("")
     
     def _build_loss(self):
         loss = PartialLDH_Loss(
