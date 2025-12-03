@@ -91,7 +91,12 @@ export nnUNet_results="$TOTALSPINESEG_DATA"/nnUNet/results
 export nnUNet_exports="$TOTALSPINESEG_DATA"/nnUNet/exports
 
 
-nnUNetTrainer=${3:-nnUNetTrainer_DASegOrd0_NoMirroring}
+# Default trainers for each step
+# Step 1 (Dataset 101): Standard trainer
+# Step 2 (Dataset 102): Custom partial LDH trainer to handle missing LDH labels
+nnUNetTrainer_Step1=${3:-nnUNetTrainer_DASegOrd0_NoMirroring}
+nnUNetTrainer_Step2=${3:-nnUNetTrainer_PartialLDH}
+
 nnUNetPlanner=${4:-ExperimentPlanner}
 # Note on nnUNetPlans_small configuration:
 # To train with a small patch size, verify that the nnUNetPlans_small.json file 
@@ -112,7 +117,8 @@ echo "  nnUNet_results=${nnUNet_results}"
 echo "  nnUNet_exports=${nnUNet_exports}"
 echo ""
 echo "Model Settings:"
-echo "  nnUNetTrainer=${nnUNetTrainer}"
+echo "  nnUNetTrainer_Step1=${nnUNetTrainer_Step1} (for Dataset 101)"
+echo "  nnUNetTrainer_Step2=${nnUNetTrainer_Step2} (for Dataset 102 - handles partial LDH labels)"
 echo "  nnUNetPlanner=${nnUNetPlanner}"
 echo "  nnUNetPlans=${nnUNetPlans}"
 echo "  configuration=${configuration}"
@@ -135,6 +141,15 @@ echo ""
 for d in ${DATASETS[@]}; do
     # Get the dataset name
     d_name=$(basename "$(ls -d "$nnUNet_raw"/Dataset${d}_*)")
+    
+    # Select appropriate trainer based on dataset
+    # Dataset 102 (Step 2) uses custom partial LDH trainer
+    if [ "$d" -eq 102 ]; then
+        nnUNetTrainer=$nnUNetTrainer_Step2
+        echo "Using custom trainer for Step 2: $nnUNetTrainer"
+    else
+        nnUNetTrainer=$nnUNetTrainer_Step1
+    fi
 
     # If dataset is 102, we need to run the merge logic after Step 1 is done
     # But wait, Step 1 training happens when d=101. 
