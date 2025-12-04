@@ -99,8 +99,8 @@ def main():
         print("Running Step 1 inference on LDH images...")
         
         # 创建输入目录
-    if temp_input_dir.exists():
         import shutil
+        if temp_input_dir.exists():
         shutil.rmtree(temp_input_dir)
     os.makedirs(temp_input_dir)
         os.makedirs(temp_pred_dir, exist_ok=True)
