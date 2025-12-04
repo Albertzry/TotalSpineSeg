@@ -11,7 +11,15 @@
 #   bash train.sh              # Train datasets 101 and 102 with fold 0 (default)
 #   bash train.sh 101 0        # Train dataset 101 with fold 0
 #   bash train.sh "101 102" 0  # Train both datasets 101 and 102 with fold 0
-#   bash train.sh all 0        # Train all datasets (101, 102, 103) with fold 0
+#   bash train.sh all 0        # Train all datasets (101, 102, 103, 105) with fold 0
+#   bash train.sh 105 0        # Train LDH dataset 105 with fold 0 (uses nnUNetTrainer_LDH by default)
+#   bash train.sh 105 0 nnUNetTrainer_LDH  # Train dataset 105 with LDH specialized trainer
+#
+# Dataset 105 (LDH Specialized Training):
+#   - Contains only LDH samples extracted from Dataset 100
+#   - Uses Step 1 predictions for spine structures + GT LDH labels
+#   - Automatically uses nnUNetTrainer_LDH unless specified otherwise
+#   - Requires prepare_dataset_105.py to be run first
 #
 # The script expects the following environment variables to be set:
 #   TOTALSPINESEG: The path to the TotalSpineSeg repository.
@@ -40,7 +48,7 @@ trap "echo Caught Keyboard Interrupt within script. Exiting now.; exit" INT
 
 # Set the datasets to work with - default is 101 102
 DATASETS=${1:-101 102}
-if [ "$DATASETS" == all ]; then DATASETS=(101 102 103); fi
+if [ "$DATASETS" == all ]; then DATASETS=(101 102 103 105); fi
 
 # Set the fold to work with - default is 0
 FOLD=${2:-0}
@@ -90,8 +98,34 @@ export nnUNet_preprocessed="$TOTALSPINESEG_DATA"/nnUNet/preprocessed
 export nnUNet_results="$TOTALSPINESEG_DATA"/nnUNet/results
 export nnUNet_exports="$TOTALSPINESEG_DATA"/nnUNet/exports
 
+# Add custom trainers to Python path for nnUNet to discover them
+export PYTHONPATH="$TOTALSPINESEG:${PYTHONPATH:-}"
 
-nnUNetTrainer=${3:-nnUNetTrainer_DASegOrd0_NoMirroring}
+# Register custom trainers with nnUNet
+# This allows nnUNet to find our custom trainers like nnUNetTrainer_LDH
+python3 -c "
+import sys
+sys.path.insert(0, '$(realpath "$TOTALSPINESEG")')
+try:
+    from totalspineseg.nnunet_extensions import nnUNetTrainer_LDH
+    print('Custom trainer nnUNetTrainer_LDH loaded successfully')
+except ImportError as e:
+    print(f'Note: Could not load custom trainer: {e}')
+" 2>/dev/null || true
+
+# Default trainer based on dataset
+# Dataset 105 (LDH) uses specialized trainer by default
+DEFAULT_TRAINER=nnUNetTrainer_DASegOrd0_NoMirroring
+if [[ "$DATASETS" == *"105"* ]] && [ -z "$3" ]; then
+    # For dataset 105, use LDH specialized trainer if no trainer specified
+    # Check if the only dataset is 105
+    if [ "$DATASETS" == "105" ]; then
+        DEFAULT_TRAINER=nnUNetTrainer_LDH
+        echo "Note: Using nnUNetTrainer_LDH for Dataset 105 (LDH specialized training)"
+    fi
+fi
+
+nnUNetTrainer=${3:-$DEFAULT_TRAINER}
 nnUNetPlanner=${4:-ExperimentPlanner}
 # Note on nnUNetPlans_small configuration:
 # To train with a small patch size, verify that the nnUNetPlans_small.json file 
@@ -135,6 +169,14 @@ echo ""
 for d in ${DATASETS[@]}; do
     # Get the dataset name
     d_name=$(basename "$(ls -d "$nnUNet_raw"/Dataset${d}_*)")
+    
+    # Select trainer based on dataset
+    # Dataset 105 (LDH) uses specialized trainer
+    CURRENT_TRAINER=$nnUNetTrainer
+    if [ "$d" == "105" ] && [ "$nnUNetTrainer" == "nnUNetTrainer_DASegOrd0_NoMirroring" ]; then
+        CURRENT_TRAINER=nnUNetTrainer_LDH
+        echo "Using LDH specialized trainer for Dataset 105"
+    fi
 
     if [ ! -f "$nnUNet_preprocessed"/$d_name/dataset_fingerprint.json ]; then
         echo "Extracting fingerprint dataset $d_name (using $JOBSNN workers, max: $MAX_PARALLEL_JOBS)"
@@ -156,35 +198,35 @@ for d in ${DATASETS[@]}; do
         nnUNetv2_preprocess -d $d -plans_name $nnUNetPlans -c $configuration -np $JOBSNN
     fi
 
-    echo "Training dataset $d_name fold $FOLD"
+    echo "Training dataset $d_name fold $FOLD with trainer $CURRENT_TRAINER"
     # if already decompressed do not decompress again
     if [ $(find "$nnUNet_preprocessed"/$d_name/$data_identifier -name "*.npy" | wc -l) -eq $(( 2 * $(find "$nnUNet_preprocessed"/$d_name/$data_identifier -name "*.npz" | wc -l))) ]; then DECOMPRESSED="--use_compressed"; else DECOMPRESSED=""; fi
-    nnUNetv2_train $d $configuration $FOLD -tr $nnUNetTrainer -p $nnUNetPlans --c -device $DEVICE $DECOMPRESSED
+    nnUNetv2_train $d $configuration $FOLD -tr $CURRENT_TRAINER -p $nnUNetPlans --c -device $DEVICE $DECOMPRESSED
 
     echo "Export the model for dataset $d_name in "$nnUNet_exports""
     mkdir -p "$nnUNet_exports"
     mkdir -p "$nnUNet_results"/$d_name/ensembles
-    nnUNetv2_export_model_to_zip -d $d -o "$nnUNet_exports"/${d_name}__${nnUNetTrainer}__${nnUNetPlans}__${configuration}__fold_$FOLD.zip -c $configuration -f $FOLD -tr $nnUNetTrainer -p $nnUNetPlans
+    nnUNetv2_export_model_to_zip -d $d -o "$nnUNet_exports"/${d_name}__${CURRENT_TRAINER}__${nnUNetPlans}__${configuration}__fold_$FOLD.zip -c $configuration -f $FOLD -tr $CURRENT_TRAINER -p $nnUNetPlans
 
     echo "Testing nnUNet model for dataset $d_name (using $JOBSNN workers, max: $MAX_PARALLEL_JOBS)"
-    mkdir -p "$nnUNet_results"/$d_name/${nnUNetTrainer}__${nnUNetPlans}__${configuration}/fold_${FOLD}/test
+    mkdir -p "$nnUNet_results"/$d_name/${CURRENT_TRAINER}__${nnUNetPlans}__${configuration}/fold_${FOLD}/test
     # -npp: number of processes for preprocessing, -nps: number of processes for segmentation
-    nnUNetv2_predict -d $d -i "$nnUNet_raw"/$d_name/imagesTs -o "$nnUNet_results"/$d_name/${nnUNetTrainer}__${nnUNetPlans}__${configuration}/fold_${FOLD}/test -f $FOLD -c $configuration -tr $nnUNetTrainer -p $nnUNetPlans -npp $JOBSNN -nps $JOBSNN
+    nnUNetv2_predict -d $d -i "$nnUNet_raw"/$d_name/imagesTs -o "$nnUNet_results"/$d_name/${CURRENT_TRAINER}__${nnUNetPlans}__${configuration}/fold_${FOLD}/test -f $FOLD -c $configuration -tr $CURRENT_TRAINER -p $nnUNetPlans -npp $JOBSNN -nps $JOBSNN
     # Evaluate with controlled parallelism
-    nnUNetv2_evaluate_folder "$nnUNet_raw"/$d_name/labelsTs "$nnUNet_results"/$d_name/${nnUNetTrainer}__${nnUNetPlans}__${configuration}/fold_${FOLD}/test -djfile "$nnUNet_results"/$d_name/${nnUNetTrainer}__${nnUNetPlans}__${configuration}/dataset.json -pfile "$nnUNet_results"/$d_name/${nnUNetTrainer}__${nnUNetPlans}__${configuration}/plans.json -np $JOBSNN
+    nnUNetv2_evaluate_folder "$nnUNet_raw"/$d_name/labelsTs "$nnUNet_results"/$d_name/${CURRENT_TRAINER}__${nnUNetPlans}__${configuration}/fold_${FOLD}/test -djfile "$nnUNet_results"/$d_name/${CURRENT_TRAINER}__${nnUNetPlans}__${configuration}/dataset.json -pfile "$nnUNet_results"/$d_name/${CURRENT_TRAINER}__${nnUNetPlans}__${configuration}/plans.json -np $JOBSNN
 
     p="$(realpath .)"
     cd "$nnUNet_results"
-    zip "$nnUNet_exports"/${d_name}__${nnUNetTrainer}__${nnUNetPlans}__${configuration}__fold_$FOLD.zip $d_name/${nnUNetTrainer}__${nnUNetPlans}__${configuration}/fold_${FOLD}/test/summary.json
+    zip "$nnUNet_exports"/${d_name}__${CURRENT_TRAINER}__${nnUNetPlans}__${configuration}__fold_$FOLD.zip $d_name/${CURRENT_TRAINER}__${nnUNetPlans}__${configuration}/fold_${FOLD}/test/summary.json
     cd "$p"
 
     echo "Export nnUNet dataset list for dataset $d_name"
     cd "$nnUNet_raw"/$d_name
     ls */ > "$nnUNet_results"/$d_name/dataset.txt
     cd "$nnUNet_results"
-    zip "$nnUNet_exports"/${d_name}__${nnUNetTrainer}__${nnUNetPlans}__${configuration}__fold_$FOLD.zip $d_name/dataset.txt
+    zip "$nnUNet_exports"/${d_name}__${CURRENT_TRAINER}__${nnUNetPlans}__${configuration}__fold_$FOLD.zip $d_name/dataset.txt
     cd "$nnUNet_preprocessed"
-    zip "$nnUNet_exports"/${d_name}__${nnUNetTrainer}__${nnUNetPlans}__${configuration}__fold_$FOLD.zip $d_name/splits_final.json
+    zip "$nnUNet_exports"/${d_name}__${CURRENT_TRAINER}__${nnUNetPlans}__${configuration}__fold_$FOLD.zip $d_name/splits_final.json
     cd "$p"
 
 done
