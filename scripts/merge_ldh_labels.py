@@ -66,7 +66,7 @@ def merge_single_case(args):
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    
+
     # 获取CPU数量用于并行
     num_workers = min(multiprocessing.cpu_count(), 12)
     print(f"Using {num_workers} workers for parallel processing")
@@ -99,15 +99,15 @@ def main():
         print("Running Step 1 inference on LDH images...")
         
         # 创建输入目录
-        if temp_input_dir.exists():
-            import shutil
-            shutil.rmtree(temp_input_dir)
-        os.makedirs(temp_input_dir)
+    if temp_input_dir.exists():
+        import shutil
+        shutil.rmtree(temp_input_dir)
+    os.makedirs(temp_input_dir)
         os.makedirs(temp_pred_dir, exist_ok=True)
-        
+    
         # 只链接需要预测的图像
         images_to_predict = []
-        for img in ldh_images:
+    for img in ldh_images:
             fname = os.path.basename(img)
             base_name = fname.replace("_0000.nii.gz", "")
             label_name = base_name + ".nii.gz"
@@ -115,28 +115,28 @@ def main():
             
             if not pred_path.exists():
                 dst = temp_input_dir / fname
-                if not dst.exists():
-                    os.symlink(img, dst)
+        if not dst.exists():
+            os.symlink(img, dst)
                 images_to_predict.append(img)
         
         if images_to_predict:
             print(f"Need to predict {len(images_to_predict)} images (skipping already predicted)")
             
             # 使用nnUNet批量推理
-            cmd = [
-                "nnUNetv2_predict",
-                "-d", str(DATASET_ID),
-                "-i", str(temp_input_dir),
-                "-o", str(temp_pred_dir),
-                "-f", str(FOLD),
-                "-c", CONFIG,
-                "-tr", TRAINER,
-                "-p", PLANS,
-                "-device", device.type
-            ]
-            
-            print(f"Executing: {' '.join(cmd)}")
-            subprocess.check_call(cmd)
+    cmd = [
+        "nnUNetv2_predict",
+        "-d", str(DATASET_ID),
+        "-i", str(temp_input_dir),
+        "-o", str(temp_pred_dir),
+        "-f", str(FOLD),
+        "-c", CONFIG,
+        "-tr", TRAINER,
+        "-p", PLANS,
+        "-device", device.type
+    ]
+    
+    print(f"Executing: {' '.join(cmd)}")
+    subprocess.check_call(cmd)
         else:
             print("All predictions already exist, skipping inference.")
     else:
@@ -156,14 +156,14 @@ def main():
         label_name = base_name + ".nii.gz"
         
         pred_path = temp_pred_dir / label_name
-        gt_path = DATASET_LDH_LABELS / label_name
+        gt_path = DATASET_LDH_LABELS / label_name 
         output_path = DATASET_102_LABELS_TR / label_name
         
         # 跳过已存在的输出
         if output_path.exists():
             skipped += 1
             continue
-            
+        
         if not pred_path.exists():
             print(f"Warning: Prediction not found for {label_name}")
             continue
@@ -192,9 +192,9 @@ def main():
                     pbar.update(1)
     else:
         print("All files already merged.")
-    
-    print("Merge complete.")
 
+    print("Merge complete.")
+    
 
 if __name__ == "__main__":
     main()

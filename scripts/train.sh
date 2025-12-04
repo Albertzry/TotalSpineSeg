@@ -51,7 +51,7 @@ TOTALSPINESEG_DATA="$(realpath "${TOTALSPINESEG_DATA:-data}")"
 
 # Maximum parallel jobs limit
 # Limiting to 12 to prevent resource exhaustion and ensure stable training
-MAX_PARALLEL_JOBS=12
+MAX_PARALLEL_JOBS=6
 
 # Get the number of CPUs
 CORES=${SLURM_JOB_CPUS_PER_NODE:-$(lscpu -p | egrep -v '^#' | wc -l)}
@@ -149,55 +149,41 @@ echo ""
 for d in ${DATASETS[@]}; do
     # Get the dataset name
     d_name=$(basename "$(ls -d "$nnUNet_raw"/Dataset${d}_*)")
-    
+
     # Select appropriate trainer based on dataset
-    # Dataset 102 (Step 2) uses custom partial LDH trainer
-    if [ "$d" -eq 102 ]; then
+    # Dataset 102/103 (Step 2) uses custom partial LDH trainer
+    if [ "$d" -eq 102 ] || [ "$d" -eq 103 ]; then
         nnUNetTrainer=$nnUNetTrainer_Step2
         echo "Using custom trainer for Step 2: $nnUNetTrainer"
     else
         nnUNetTrainer=$nnUNetTrainer_Step1
     fi
 
-    # If dataset is 102, we need to run the merge logic after Step 1 is done
+    # If dataset is 102 or 103 (Step 2), run the preparation steps
     if [ "$d" -eq 102 ]; then
-        # 检查是否需要重新merge（基于时间戳或标记文件）
-        MERGE_MARKER="$nnUNet_raw"/$d_name/.merge_complete
-        NEED_REPROCESS=false
+        echo "Running LDH Label Merge for Dataset 102..."
+        python3 "$TOTALSPINESEG"/scripts/merge_ldh_labels.py
         
-        # 检查Step1模型是否存在
-        STEP1_MODEL="$nnUNet_results/Dataset101_TotalSpineSeg_step1/${nnUNetTrainer_Step1}__${nnUNetPlans}__${configuration}/fold_${FOLD}/checkpoint_final.pth"
-        if [ ! -f "$STEP1_MODEL" ]; then
-            echo "Warning: Step 1 model not found at $STEP1_MODEL"
-            echo "Please train Dataset 101 first."
+        echo "Fixing metadata mismatch for Dataset 102..."
+        python3 "$TOTALSPINESEG"/scripts/fix_metadata.py -d "$nnUNet_raw"/$d_name --no-backup
+        
+        if [ -d "$nnUNet_preprocessed"/$d_name ]; then
+             echo "Removing existing preprocessed data for $d_name to force re-preprocessing with new labels..."
+             rm -rf "$nnUNet_preprocessed"/$d_name
         fi
+    fi
+    
+    # Dataset 103 is mini dataset for testing, fix metadata if needed
+    if [ "$d" -eq 103 ]; then
+        echo "Preparing Dataset 103 (mini test dataset)..."
         
-        # 只有在需要时才运行merge
-        if [ ! -f "$MERGE_MARKER" ]; then
-            echo "Running LDH Label Merge for Dataset 102..."
-            python3 "$TOTALSPINESEG"/scripts/merge_ldh_labels.py
-            
-            # 标记merge完成
-            touch "$MERGE_MARKER"
-            NEED_REPROCESS=true
-        else
-            echo "LDH merge already completed (found marker file), skipping..."
-        fi
+        # Fix metadata mismatch
+        echo "Fixing metadata mismatch for Dataset 103..."
+        python3 "$TOTALSPINESEG"/scripts/fix_metadata.py -d "$nnUNet_raw"/$d_name --no-backup
         
-        # 只在首次或有变化时修复元数据
-        METADATA_MARKER="$nnUNet_raw"/$d_name/.metadata_fixed
-        if [ ! -f "$METADATA_MARKER" ]; then
-            echo "Fixing metadata mismatch for Dataset 102..."
-            python3 "$TOTALSPINESEG"/scripts/fix_metadata.py -d "$nnUNet_raw"/$d_name --no-backup
-            touch "$METADATA_MARKER"
-            NEED_REPROCESS=true
-        else
-            echo "Metadata already fixed, skipping..."
-        fi
-        
-        # 只在需要时删除预处理数据
-        if [ "$NEED_REPROCESS" = true ] && [ -d "$nnUNet_preprocessed"/$d_name ]; then
-            echo "Removing existing preprocessed data for $d_name to force re-preprocessing with new labels..."
+        # Remove preprocessed to force re-preprocessing
+        if [ -d "$nnUNet_preprocessed"/$d_name ]; then
+            echo "Removing existing preprocessed data for $d_name..."
             rm -rf "$nnUNet_preprocessed"/$d_name
         fi
     fi
