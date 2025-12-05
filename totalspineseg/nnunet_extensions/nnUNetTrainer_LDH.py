@@ -304,14 +304,22 @@ class LDH_MicroStructure_Loss(nn.Module):
         """
         # 获取 LDH 概率
         net_output_fp32 = net_output.float()
-        ldh_probs = torch.sigmoid(net_output_fp32)
         
-        if ldh_probs.ndim == 5 and ldh_probs.shape[1] == 1:
-            ldh_probs_squeezed = ldh_probs[:, 0]
-            logits_squeezed = net_output_fp32[:, 0]
+        # 处理 2通道 (Background, LDH) 或 1通道 (LDH) 输出
+        if net_output_fp32.ndim == 5 and net_output_fp32.shape[1] == 2:
+            # 2通道: 使用 Softmax
+            ldh_probs = torch.softmax(net_output_fp32, dim=1)
+            ldh_probs_squeezed = ldh_probs[:, 1]  # 取 LDH 通道
+            logits_squeezed = net_output_fp32     # 保留完整 logits 用于 CE
         else:
-            ldh_probs_squeezed = ldh_probs
-            logits_squeezed = net_output_fp32
+            # 1通道: 使用 Sigmoid
+            ldh_probs = torch.sigmoid(net_output_fp32)
+            if ldh_probs.ndim == 5 and ldh_probs.shape[1] == 1:
+                ldh_probs_squeezed = ldh_probs[:, 0]
+                logits_squeezed = net_output_fp32[:, 0]
+            else:
+                ldh_probs_squeezed = ldh_probs
+                logits_squeezed = net_output_fp32
         
         # 获取 LDH GT
         if target.ndim == 5:
@@ -377,11 +385,16 @@ class LDH_MicroStructure_Loss(nn.Module):
         return 1 - dice
     
     def _weighted_ce_loss(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """带权重的 BCE"""
-        pos_weight = torch.tensor([self.ce_pos_weight], device=logits.device)
-        return F.binary_cross_entropy_with_logits(
-            logits, target, pos_weight=pos_weight, reduction='mean'
-        )
+        """带权重的 CrossEntropyLoss"""
+        # 确保 target 是 long 类型 (B, D, H, W)
+        if target.ndim == 5:
+            target = target[:, 0]
+        
+        # 权重: 背景=1.0, LDH=ce_pos_weight
+        weights = torch.tensor([1.0, self.ce_pos_weight], device=logits.device)
+        
+        # 使用 CrossEntropyLoss
+        return F.cross_entropy(logits, target.long(), weight=weights, reduction='mean')
     
     def _focal_tversky_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Focal Tversky Loss - 小目标优化"""

@@ -241,6 +241,8 @@ def run_step1_inference(dst_dataset: Path, nnunet_results: Path,
         print("  Warning: No GPU available, using CPU (this will be slow)")
     
     # Run nnUNet predict
+    # Use 6 processes for preprocessing and segmentation
+    num_workers = min(6, jobs)
     cmd = [
         'nnUNetv2_predict',
         '-d', '101',
@@ -251,8 +253,8 @@ def run_step1_inference(dst_dataset: Path, nnunet_results: Path,
         '-tr', trainer,
         '-p', plans,
         '-device', device,
-        '-npp', str(min(jobs, 2)),  # Limit preprocessing workers
-        '-nps', str(min(jobs, 2)),  # Limit segmentation workers
+        '-npp', str(num_workers),  # Preprocessing workers (6)
+        '-nps', str(num_workers),  # Segmentation workers (6)
     ]
     
     print(f"Running: {' '.join(cmd)}")
