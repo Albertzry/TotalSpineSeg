@@ -13,6 +13,7 @@
 #   bash train.sh "101 102" 0  # Train both datasets 101 and 102 with fold 0
 #   bash train.sh all 0        # Train all datasets (101, 102, 103, 105) with fold 0
 #   bash train.sh 105 0        # Train LDH dataset 105 with fold 0 (uses nnUNetTrainer_LDH by default)
+#   bash train.sh 106 0        # (removed) Train LDH dataset 106 with fold 0 (Step6 no longer available)
 #   bash train.sh 105 0 nnUNetTrainer_LDH  # Train dataset 105 with LDH specialized trainer
 #
 # Dataset 105 (LDH Specialized Training):
@@ -20,6 +21,8 @@
 #   - Uses Step 1 predictions for spine structures + GT LDH labels
 #   - Automatically uses nnUNetTrainer_LDH unless specified otherwise
 #   - Requires prepare_dataset_105.py to be run first
+#
+# Dataset 106 support removed.
 #
 # The script expects the following environment variables to be set:
 #   TOTALSPINESEG: The path to the TotalSpineSeg repository.
@@ -59,7 +62,7 @@ TOTALSPINESEG_DATA="$(realpath "${TOTALSPINESEG_DATA:-data}")"
 
 # Maximum parallel jobs limit
 # Limiting to 12 to prevent resource exhaustion and ensure stable training
-MAX_PARALLEL_JOBS=12
+MAX_PARALLEL_JOBS=6
 
 # Get the number of CPUs
 CORES=${SLURM_JOB_CPUS_PER_NODE:-$(lscpu -p | egrep -v '^#' | wc -l)}
