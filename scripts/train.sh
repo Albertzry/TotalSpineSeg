@@ -12,14 +12,14 @@
 #   bash train.sh 101 0        # Train dataset 101 with fold 0
 #   bash train.sh "101 102" 0  # Train both datasets 101 and 102 with fold 0
 #   bash train.sh all 0        # Train all datasets (101, 102, 103, 105) with fold 0
-#   bash train.sh 105 0        # Train LDH dataset 105 with fold 0 (uses nnUNetTrainer_LDH by default)
+#   bash train.sh 105 0        # Train LDH dataset 105 with fold 0 (two-stage pipeline)
 #   bash train.sh 106 0        # (removed) Train LDH dataset 106 with fold 0 (Step6 no longer available)
-#   bash train.sh 105 0 nnUNetTrainer_LDH  # Train dataset 105 with LDH specialized trainer
 #
 # Dataset 105 (LDH Specialized Training):
 #   - Contains only LDH samples extracted from Dataset 100
-#   - Uses Step 1 predictions for spine structures + GT LDH labels
-#   - Automatically uses nnUNetTrainer_LDH unless specified otherwise
+#   - Two-stage disc-level pipeline (StageA detection + StageB ROI segmentation)
+#       - Uses Step2-derived disc index prior (disc_index_maps + per-disc patches/ROIs)
+#       - Training is executed via python scripts (not nnUNetv2_train)
 #   - Requires prepare_dataset_105.py to be run first
 #
 # Dataset 106 support removed.
@@ -104,29 +104,8 @@ export nnUNet_exports="$TOTALSPINESEG_DATA"/nnUNet/exports
 # Add custom trainers to Python path for nnUNet to discover them
 export PYTHONPATH="$TOTALSPINESEG:${PYTHONPATH:-}"
 
-# Register custom trainers with nnUNet
-# This allows nnUNet to find our custom trainers like nnUNetTrainer_LDH
-python3 -c "
-import sys
-sys.path.insert(0, '$(realpath "$TOTALSPINESEG")')
-try:
-    from totalspineseg.nnunet_extensions import nnUNetTrainer_LDH
-    print('Custom trainer nnUNetTrainer_LDH loaded successfully')
-except ImportError as e:
-    print(f'Note: Could not load custom trainer: {e}')
-" 2>/dev/null || true
-
 # Default trainer based on dataset
-# Dataset 105 (LDH) uses specialized trainer by default
 DEFAULT_TRAINER=nnUNetTrainer_DASegOrd0_NoMirroring
-if [[ "$DATASETS" == *"105"* ]] && [ -z "$3" ]; then
-    # For dataset 105, use LDH specialized trainer if no trainer specified
-    # Check if the only dataset is 105
-    if [ "$DATASETS" == "105" ]; then
-        DEFAULT_TRAINER=nnUNetTrainer_LDH
-        echo "Note: Using nnUNetTrainer_LDH for Dataset 105 (LDH specialized training)"
-    fi
-fi
 
 nnUNetTrainer=${3:-$DEFAULT_TRAINER}
 nnUNetPlanner=${4:-ExperimentPlanner}
@@ -172,14 +151,86 @@ echo ""
 for d in ${DATASETS[@]}; do
     # Get the dataset name
     d_name=$(basename "$(ls -d "$nnUNet_raw"/Dataset${d}_*)")
+
+    # ==============================================================================================================
+    # Dataset 105: Two-stage LDH training (ONLY supported mode)
+    #
+    # Inputs produced by scripts/prepare_dataset_105.py (twostage):
+    #   - $nnUNet_raw/$d_name/ldh_twostage/stageA_patches/*.npz
+    #   - $nnUNet_raw/$d_name/ldh_twostage/stageB_rois/*.npz
+    #   - $nnUNet_raw/$d_name/disc_index_maps/*.nii.gz
+    #
+    # Outputs:
+    #   - $nnUNet_results/$d_name/ldh_twostage/checkpoints/ldh_stageA_fold_${FOLD}.pth
+    #   - $nnUNet_results/$d_name/ldh_twostage/checkpoints/ldh_stageB_fold_${FOLD}.pth
+    #   - (optional) evaluation metrics printed to stdout
+    # ==============================================================================================================
+    if [ "$d" == "105" ]; then
+        echo ""
+        echo "=========================================="
+        echo "Dataset 105: LDH two-stage training"
+        echo "=========================================="
+
+        STAGEA_DIR="$nnUNet_raw/$d_name/ldh_twostage/stageA_patches"
+        STAGEB_DIR="$nnUNet_raw/$d_name/ldh_twostage/stageB_rois"
+        CKPT_DIR="$nnUNet_results/$d_name/ldh_twostage/checkpoints"
+        mkdir -p "$CKPT_DIR"
+
+        if [ ! -d "$STAGEA_DIR" ] || [ -z "$(ls -A "$STAGEA_DIR" 2>/dev/null)" ]; then
+            echo "ERROR: StageA patches not found or empty: $STAGEA_DIR"
+            echo "Run: python scripts/prepare_dataset_105.py before training."
+            exit 1
+        fi
+        if [ ! -d "$STAGEB_DIR" ] || [ -z "$(ls -A "$STAGEB_DIR" 2>/dev/null)" ]; then
+            echo "ERROR: StageB ROIs not found or empty: $STAGEB_DIR"
+            echo "Run: python scripts/prepare_dataset_105.py before training."
+            exit 1
+        fi
+
+        CKPT_A="$CKPT_DIR/ldh_stageA_fold_${FOLD}.pth"
+        CKPT_B="$CKPT_DIR/ldh_stageB_fold_${FOLD}.pth"
+
+        # Throughput tuning for two-stage python trainers (override via env):
+        # - STAGEA_BATCH_SIZE / STAGEB_BATCH_SIZE
+        # - STAGEA_WORKERS / STAGEB_WORKERS
+        DL_WORKERS_DEFAULT=$(( CORES < 12 ? CORES : 12 ))
+        STAGEA_BATCH_SIZE="${STAGEA_BATCH_SIZE:-16}"
+        STAGEA_WORKERS="${STAGEA_WORKERS:-$DL_WORKERS_DEFAULT}"
+        STAGEB_BATCH_SIZE="${STAGEB_BATCH_SIZE:-4}"
+        STAGEB_WORKERS="${STAGEB_WORKERS:-$DL_WORKERS_DEFAULT}"
+
+            echo "Stage A (disc-level detection) training..."
+            PYTHONPATH="$TOTALSPINESEG:${PYTHONPATH:-}" python3 "$TOTALSPINESEG/scripts/train_ldh_stage_a.py" \
+                --patches-dir "$STAGEA_DIR" \
+                --out "$CKPT_A" \
+                --device "$DEVICE" \
+                --epochs 500 \
+                --batch-size "$STAGEA_BATCH_SIZE" \
+                --num-workers "$STAGEA_WORKERS"
+
+            echo "Stage B (ROI fine segmentation) training..."
+            PYTHONPATH="$TOTALSPINESEG:${PYTHONPATH:-}" python3 "$TOTALSPINESEG/scripts/train_ldh_stage_b.py" \
+                --rois-dir "$STAGEB_DIR" \
+                --out "$CKPT_B" \
+                --device "$DEVICE" \
+                --epochs 1000 \
+                --batch-size "$STAGEB_BATCH_SIZE" \
+                --num-workers "$STAGEB_WORKERS"
+
+            echo "Evaluation (disc-level recall, lesion-wise detection rate, Dice, ASD)..."
+            PYTHONPATH="$TOTALSPINESEG:${PYTHONPATH:-}" python3 "$TOTALSPINESEG/scripts/eval_ldh_twostage.py" \
+                --stagea-patches-dir "$STAGEA_DIR" \
+                --stageb-rois-dir "$STAGEB_DIR" \
+                --ckpt-stagea "$CKPT_A" \
+                --ckpt-stageb "$CKPT_B" \
+                --device "$DEVICE"
+
+        echo "Dataset 105 two-stage training completed."
+        continue
+    fi
     
     # Select trainer based on dataset
-    # Dataset 105 (LDH) uses specialized trainer
     CURRENT_TRAINER=$nnUNetTrainer
-    if [ "$d" == "105" ] && [ "$nnUNetTrainer" == "nnUNetTrainer_DASegOrd0_NoMirroring" ]; then
-        CURRENT_TRAINER=nnUNetTrainer_LDH
-        echo "Using LDH specialized trainer for Dataset 105"
-    fi
 
     if [ ! -f "$nnUNet_preprocessed"/$d_name/dataset_fingerprint.json ]; then
         echo "Extracting fingerprint dataset $d_name (using $JOBSNN workers, max: $MAX_PARALLEL_JOBS)"

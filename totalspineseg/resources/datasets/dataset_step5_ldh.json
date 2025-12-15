@@ -1,7 +1,8 @@
 {
     "channel_names": {
         "0": "MRI",
-        "1": "Step1_Prediction"
+        "1": "DiscMask_or_Context",
+        "2": "DiscIndexPrior"
     },
     "labels": {
         "background": 0,
@@ -10,5 +11,5 @@
     "numTraining": 0,
     "file_ending": ".nii.gz",
     "overwrite_image_reader_writer": "SimpleITKIO",
-    "description": "Dataset 105 - LDH-only binary segmentation. Channel 0: MRI image, Channel 1: Step1 spine structure predictions as anatomical context."
+    "description": "Dataset 105 - LDH (two-stage refactor): replace Step1 prior with Step2-derived anatomical prior (disc mask + disc index). Note: the recommended pipeline uses disc-level patches + ROI fine segmentation with SDM supervision, not whole-spine end-to-end training."
 }

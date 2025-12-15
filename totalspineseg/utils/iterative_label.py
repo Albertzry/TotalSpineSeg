@@ -349,6 +349,7 @@ def iterative_label_mp(
             dilation_size=dilation_size,
             default_superior_disc=default_superior_disc,
             overwrite=overwrite,
+            quiet=quiet,
         ),
         seg_path_list,
         output_seg_path_list,
@@ -384,6 +385,7 @@ def _iterative_label(
         dilation_size=1,
         default_superior_disc=0,
         overwrite=False,
+        quiet=False,
     ):
     '''
     Wrapper function to handle IO.
@@ -428,7 +430,8 @@ def _iterative_label(
         )
     except ValueError as e:
         output_seg_path.is_file() and output_seg_path.unlink()
-        print(f'Error: {seg_path}, {e}')
+        if not quiet:
+            print(f'Error: {seg_path}, {e}')
         return
 
     # Ensure correct segmentation dtype, affine and header

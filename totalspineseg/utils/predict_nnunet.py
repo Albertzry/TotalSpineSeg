@@ -2,6 +2,9 @@ import argparse, textwrap
 import os
 from pathlib import Path
 import torch
+import sys
+import types
+import multiprocessing as mp
 
 # This is just to silence nnUNet warnings. These variables should have no purpose/effect.
 # There are sadly no other workarounds at the moment, see:
@@ -216,12 +219,53 @@ def predict_nnunet(
         verbose = False,
         disable_progress_bar = False
 ):
+    # nnUNet uses multiprocessing background workers for preprocessing/export.
+    # On Linux, default 'fork' can be fragile after CUDA initialization and may
+    # lead to silent worker deaths/hangs. Force 'spawn' where possible.
+    try:
+        mp.set_start_method('spawn', force=False)
+    except RuntimeError:
+        pass
+
+    # SimpleITK/ITK can oversubscribe threads inside each worker, amplifying RAM
+    # usage and causing workers to be killed. Keep it single-threaded by default.
+    os.environ.setdefault('ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS', '1')
+    os.environ.setdefault('OMP_NUM_THREADS', '1')
+    os.environ.setdefault('MKL_NUM_THREADS', '1')
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+
+    # Be conservative by default: nnUNet spawns processes and each can be heavy.
+    try:
+        npp = max(1, int(npp))
+        nps = max(1, int(nps))
+    except Exception:
+        npp, nps = 1, 1
+    npp = min(npp, 2)
+    nps = min(nps, 2)
+
     # Check variables
     folds = [i if i == 'all' else int(i) for i in folds]
     assert part_id < num_parts
 
     # Create output folder if does not exists
     output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # --------------------------------------------------------------------------------------------------------------
+    # nnUNetv2 trainer discovery workaround
+    #
+    # nnUNetv2 uses recursive module imports under nnunetv2/training/nnUNetTrainer to find trainer classes.
+    # If ANY trainer module in that folder raises ImportError at import time, inference can fail even if the
+    # requested trainer is unrelated (this happens in some environments with leftover LDH Step6 trainers).
+    #
+    # To make inference robust, we pre-stub known-bad modules so importlib returns a harmless module instead
+    # of executing the faulty file.
+    # --------------------------------------------------------------------------------------------------------------
+    _bad_trainer_modules = [
+        "nnunetv2.training.nnUNetTrainer.nnUNetTrainer_LDH_Step6",
+    ]
+    for _m in _bad_trainer_modules:
+        if _m not in sys.modules:
+            sys.modules[_m] = types.ModuleType(_m)
     
     # Start nnUNet inference
     predictor = nnUNetPredictor(tile_step_size=step_size,

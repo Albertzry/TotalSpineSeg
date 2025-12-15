@@ -1,7 +1,7 @@
 import argparse, textwrap, os
 from pathlib import Path
 import importlib.resources
-from totalspineseg import models, install_weights
+from totalspineseg import install_weights
 from totalspineseg.utils.utils import ZIP_URLS
 
 def main():
@@ -44,7 +44,8 @@ def main():
     elif 'TOTALSPINESEG_DATA' in os.environ:
         data_path = Path(os.environ.get('TOTALSPINESEG_DATA', ''))
     else:
-        data_path = importlib.resources.files(models)
+        # Fallback: use package directory as data path
+        data_path = Path(__file__).parent.parent / 'data'
 
     # Initialize inference
     init_inference(

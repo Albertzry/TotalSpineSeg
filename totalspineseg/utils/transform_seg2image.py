@@ -185,14 +185,20 @@ def _transform_seg2image(
         print(f'Error: {seg_path}, Segmentation file not found')
         return
 
-    image = nib.load(image_path)
-    seg = nib.load(seg_path)
+    try:
+        image = nib.load(image_path)
+        seg = nib.load(seg_path)
 
-    output_seg = transform_seg2image(
-        image,
-        seg,
-        interpolation=interpolation,
-    )
+        output_seg = transform_seg2image(
+            image,
+            seg,
+            interpolation=interpolation,
+        )
+    except Exception as e:
+        # Do not crash the whole multiprocessing run because of a single case
+        output_seg_path.is_file() and output_seg_path.unlink()
+        print(f'Error: {seg_path}, failed to transform to image space ({type(e).__name__}: {e})')
+        return
 
     # Ensure correct segmentation dtype, affine and header
     if interpolation == 'linear':
@@ -240,7 +246,7 @@ def transform_seg2image(
     if len(np.asanyarray(image.dataobj).shape) == 4:
         image = image.slicer[..., 0]
 
-    image_data = np.asanyarray(image.dataobj).astype(np.float64)
+    image_data = np.asanyarray(image.dataobj).astype(np.float32)
     image_affine = image.affine.copy()
     seg_data = np.asanyarray(seg.dataobj)
     if interpolation == 'linear':
