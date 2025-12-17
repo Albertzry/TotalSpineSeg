@@ -368,7 +368,7 @@ def build_dataset105_from_data_ori(
     dst_labels_tr = dst_dataset / "labelsTr"
     dst_images_tr.mkdir(parents=True, exist_ok=True)
     dst_labels_tr.mkdir(parents=True, exist_ok=True)
-
+    
     mapping = {}
     print(f"Copying and renaming {len(img_files)} raw cases into {dst_dataset} ...")
     for img_path in tqdm(img_files, desc="Copying raw images/labels", unit="case"):
@@ -543,7 +543,7 @@ def _augment_ldh_light_one(
     if not seg_path.is_file():
         print(f"Error: {seg_path}, Segmentation file not found")
         return
-
+    
     image = nib.load(str(image_path))
     seg = nib.load(str(seg_path))
 
@@ -586,7 +586,7 @@ def _augment_ldh_light_one(
         out = xform(subject)
         out_img_data = out.image.data.numpy()[0, ...].astype(np.float32)
         out_seg_data = out.seg.data.numpy()[0, ...].round().astype(np.uint8)
-
+    
         # Optional minimal smoothing for jagged boundaries
         if label_smooth:
             # Small closing to remove 1-voxel "stairs"/holes; keep effect minimal
@@ -684,7 +684,7 @@ def run_step2_inference_and_postprocess(
     print("  - Filling canal...")
     fill_canal_mp(step1_out, step1_out, canal_label=2, cord_label=1, largest_canal=True, largest_cord=True,
                   overwrite=True, max_workers=jobs, quiet=False)
-
+        
     # ---------- Validate Step1 postprocessing results ----------
     # Some cases may fail Step1 labeling (missing disc/canal/landmarks). Those cases cannot build Step2 input
     # reliably. We explicitly filter them out to avoid cascading failures.
@@ -845,7 +845,7 @@ def export_disc_patches_twostage(
         from tqdm.contrib.concurrent import process_map
     except Exception:
         process_map = None
-
+        
     if process_map is None or max_workers == 1:
         for img_path in tqdm(img_paths, desc="Extracting disc patches", unit="case"):
             _extract_patches_for_case_mp(

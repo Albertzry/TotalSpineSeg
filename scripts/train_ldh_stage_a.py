@@ -110,6 +110,35 @@ def _save_training_curves(history: dict, out_ckpt: Path) -> Path:
     return plot_path
 
 
+def _load_train_sample_ids(patches_dir: Path) -> set[str]:
+    """
+    Load training sample IDs from Dataset105/imagesTr to avoid data leakage.
+    
+    Returns:
+        Set of sample IDs that belong to the training split.
+    """
+    # patches_dir is typically: .../Dataset105_TotalSpineSeg_LDH/ldh_twostage/stageA_patches
+    # dataset root is: .../Dataset105_TotalSpineSeg_LDH
+    dataset_root = patches_dir.parent.parent
+    images_tr = dataset_root / "imagesTr"
+    
+    if not images_tr.exists():
+        raise FileNotFoundError(
+            f"imagesTr directory not found at {images_tr}. "
+            "Ensure prepare_dataset_105.py has been run and created train/test split."
+        )
+    
+    train_ids = set()
+    for f in images_tr.glob("*_0000.nii.gz"):
+        sample_id = f.name.replace("_0000.nii.gz", "")
+        train_ids.add(sample_id)
+    
+    if not train_ids:
+        raise ValueError(f"No training samples found in {images_tr}")
+    
+    return train_ids
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--patches-dir", type=Path, required=True, help="Directory with StageA .npz patches")
@@ -124,10 +153,15 @@ def main():
     args = ap.parse_args()
 
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Stage A init: patches_dir={args.patches_dir}")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Stage A loading train split...")
+    
+    # Load train sample IDs to prevent data leakage
+    train_sample_ids = _load_train_sample_ids(args.patches_dir)
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Stage A train split: {len(train_sample_ids)} samples (from imagesTr)")
+    
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Stage A indexing patches (reading has_ldh only)...")
-
-    ds = StageADataset(args.patches_dir)
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Stage A patches indexed: n={len(ds)}")
+    ds = StageADataset(args.patches_dir, filter_sample_ids=train_sample_ids)
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Stage A patches indexed: n={len(ds)} (train split only)")
     n_val = max(1, int(len(ds) * args.val_ratio))
     n_train = len(ds) - n_val
     train_ds, val_ds = random_split(ds, [n_train, n_val], generator=torch.Generator().manual_seed(42))

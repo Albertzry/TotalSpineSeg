@@ -204,7 +204,7 @@ for d in ${DATASETS[@]}; do
                 --patches-dir "$STAGEA_DIR" \
                 --out "$CKPT_A" \
                 --device "$DEVICE" \
-                --epochs 500 \
+                --epochs 50 \
                 --batch-size "$STAGEA_BATCH_SIZE" \
                 --num-workers "$STAGEA_WORKERS"
 
@@ -213,7 +213,7 @@ for d in ${DATASETS[@]}; do
                 --rois-dir "$STAGEB_DIR" \
                 --out "$CKPT_B" \
                 --device "$DEVICE" \
-                --epochs 1000 \
+                --epochs 500 \
                 --batch-size "$STAGEB_BATCH_SIZE" \
                 --num-workers "$STAGEB_WORKERS"
 

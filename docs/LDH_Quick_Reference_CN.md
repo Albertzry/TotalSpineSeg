@@ -65,8 +65,14 @@ python scripts/train_ldh_stage_b.py --epochs 200 --batch-size 16
 
 # 只评估
 python scripts/eval_ldh_twostage.py \
-    --model-a $TOTALSPINESEG_DATA/ldh_stage_a/best_model.pth \
-    --model-b $TOTALSPINESEG_DATA/ldh_stage_b/best_model.pth
+    --ckpt-dir "/opt/data/private/data_sum/nnUNet/results/Dataset105_TotalSpineSeg_LDH/ldh_twostage/checkpoints" \
+    --device cuda
+
+# 也可以显式指定数据目录（当 raw 数据不在默认位置时）
+python scripts/eval_ldh_twostage.py \
+    --data-root "$TOTALSPINESEG_DATA/nnUNet/raw/Dataset105_TotalSpineSeg_LDH/ldh_twostage" \
+    --ckpt-dir  "/opt/data/private/data_sum/nnUNet/results/Dataset105_TotalSpineSeg_LDH/ldh_twostage/checkpoints" \
+    --device cuda
 ```
 
 ---

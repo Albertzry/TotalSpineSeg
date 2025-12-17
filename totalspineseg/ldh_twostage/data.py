@@ -22,8 +22,38 @@ class PatchRecord:
     has_ldh: int
 
 
-def index_patches(patches_dir: Path, *, desc: str | None = None) -> List[PatchRecord]:
+def index_patches(
+    patches_dir: Path, 
+    *, 
+    desc: str | None = None,
+    filter_sample_ids: set[str] | None = None
+) -> List[PatchRecord]:
+    """
+    Index patches from directory, optionally filtering by sample_id.
+    
+    Args:
+        patches_dir: Directory containing .npz patches
+        desc: Progress bar description
+        filter_sample_ids: If provided, only include patches whose filename starts with one of these sample IDs
+    
+    Returns:
+        List of PatchRecord objects
+    """
     patches = sorted(patches_dir.glob("*.npz"))
+    
+    # Pre-filter files by sample_id if requested
+    if filter_sample_ids is not None:
+        filtered_patches = []
+        for p in patches:
+            fname = p.stem
+            # Check if filename starts with any of the allowed sample IDs
+            # Format: {sample_id}_disc{disc_label}_...
+            for sid in filter_sample_ids:
+                if fname.startswith(sid + "_"):
+                    filtered_patches.append(p)
+                    break
+        patches = filtered_patches
+    
     records: List[PatchRecord] = []
     it = tqdm(patches, desc=(desc or f"Indexing {patches_dir.name}"), unit="patch", leave=False)
     for p in it:
@@ -48,8 +78,19 @@ class StageADataset(Dataset):
     Each item is one patch with mandatory sampling type already applied in preparation.
     """
 
-    def __init__(self, patches_dir: Path):
-        self.records = index_patches(patches_dir, desc="Indexing StageA patches")
+    def __init__(self, patches_dir: Path, filter_sample_ids: set[str] | None = None):
+        """
+        Initialize Stage A dataset.
+        
+        Args:
+            patches_dir: Directory containing .npz patches
+            filter_sample_ids: If provided, only load patches from these sample IDs (prevents data leakage)
+        """
+        self.records = index_patches(
+            patches_dir, 
+            desc="Indexing StageA patches",
+            filter_sample_ids=filter_sample_ids
+        )
         if len(self.records) == 0:
             raise ValueError(f"no .npz found in {patches_dir}")
 
@@ -74,8 +115,19 @@ class StageBDataset(Dataset):
     Expects each .npz to already be the ROI patch with GT mask (+ optional SDM).
     """
 
-    def __init__(self, rois_dir: Path):
-        records = index_patches(rois_dir, desc="Indexing StageB rois")
+    def __init__(self, rois_dir: Path, filter_sample_ids: set[str] | None = None):
+        """
+        Initialize Stage B dataset.
+        
+        Args:
+            rois_dir: Directory containing .npz ROI patches
+            filter_sample_ids: If provided, only load patches from these sample IDs (prevents data leakage)
+        """
+        records = index_patches(
+            rois_dir, 
+            desc="Indexing StageB rois",
+            filter_sample_ids=filter_sample_ids
+        )
         self.records = [r for r in records if r.has_ldh == 1]
         if len(self.records) == 0:
             raise ValueError(f"no positive ROIs found in {rois_dir}")

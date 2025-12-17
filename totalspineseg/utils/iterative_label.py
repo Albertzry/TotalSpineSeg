@@ -432,7 +432,7 @@ def _iterative_label(
         output_seg_path.is_file() and output_seg_path.unlink()
         if not quiet:
             print(f'Error: {seg_path}, {e}')
-        return
+        return None
 
     # Ensure correct segmentation dtype, affine and header
     output_seg = nib.Nifti1Image(
