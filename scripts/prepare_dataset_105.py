@@ -169,6 +169,8 @@ def _extract_patches_for_case_mp(
     stageb_roi_size: tuple[int, int, int],
     disc_labels: tuple[int, ...],
     seed: int,
+    stageb_neg_per_disc: int,
+    stageb_hardneg_per_posdisc: int,
 ) -> tuple[int, int]:
     """
     Worker for multi-process patch extraction (one case).
@@ -241,7 +243,52 @@ def _extract_patches_for_case_mp(
             )
             n_a += 1
 
-        # StageB ROI (positives only, center at GT LDH centroid if available)
+        # ---------------- StageB ROI ----------------
+        # IMPORTANT (Scheme D):
+        #   We export BOTH positives and "hard negative" ROIs, so StageB learns to output empty masks
+        #   when the ROI is wrong or when the disc has no LDH.
+        #
+        # ROI center rules:
+        #   - Positive disc: 1 positive ROI centered at GT LDH centroid (fallback disc centroid)
+        #                   + `stageb_hardneg_per_posdisc` negative ROIs sampled from disc_region \ ldh
+        #   - Negative disc: `stageb_neg_per_disc` negative ROIs sampled from disc_region
+        #
+        # Negative ROI labels:
+        #   - ldh_mask all zeros
+        #   - sdm all zeros (signed_distance_map handles empty mask -> zeros; this is stable)
+        #
+        # Why it helps:
+        #   StageB otherwise only sees positives during training and may hallucinate positives at inference.
+        try:
+            from scipy.ndimage import binary_erosion
+            from totalspineseg.ldh_twostage.distance_maps import boundary_band
+        except Exception:
+            binary_erosion = None
+            boundary_band = None
+
+        def _centroid_zyx(mask_u8: np.ndarray) -> tuple[int, int, int]:
+            coords = np.array(np.nonzero(mask_u8))
+            if coords.size == 0:
+                return (mask_u8.shape[0] // 2, mask_u8.shape[1] // 2, mask_u8.shape[2] // 2)
+            cz, cy, cx = coords.mean(axis=1)
+            return (int(round(cz)), int(round(cy)), int(round(cx)))
+
+        def _sample_centers_from_mask(mask_u8: np.ndarray, k: int) -> list[tuple[int, int, int]]:
+            k = int(max(0, k))
+            if k == 0:
+                return []
+            coords = np.array(np.nonzero(mask_u8 > 0))
+            if coords.size == 0:
+                return [_centroid_zyx(mask_u8)]
+            n = coords.shape[1]
+            take = int(min(k, n))
+            idx = rng.choice(n, size=take, replace=False)
+            out: list[tuple[int, int, int]] = []
+            for j in np.atleast_1d(idx):
+                z, y, x = coords[:, int(j)].tolist()
+                out.append((int(z), int(y), int(x)))
+            return out
+
         if has_ldh == 1:
             coords = np.array(np.nonzero(ldh_in_disc))
             if coords.size > 0:
@@ -249,9 +296,7 @@ def _extract_patches_for_case_mp(
                 center = (int(round(cz)), int(round(cy)), int(round(cx)))
             else:
                 # fallback: disc centroid
-                coords2 = np.array(np.nonzero(disc_region))
-                cz, cy, cx = coords2.mean(axis=1)
-                center = (int(round(cz)), int(round(cy)), int(round(cx)))
+                center = _centroid_zyx(disc_region)
 
             img_roi, _, _ = crop_patch_zyx(img, center, stageb_roi_size, pad_value=0.0)
             disc_roi, _, _ = crop_patch_zyx(disc_region.astype(np.float32), center, stageb_roi_size, pad_value=0.0)
@@ -273,6 +318,77 @@ def _extract_patches_for_case_mp(
                 patch_type=np.array("roi", dtype="S"),
             )
             n_b += 1
+
+            # Hard negatives for positive discs: sample centers from disc excluding LDH
+            if int(stageb_hardneg_per_posdisc) > 0:
+                neg_mask = ((disc_region > 0) & (ldh_in_disc == 0)).astype(np.uint8)
+                # Prefer boundary/interior sampling if available, otherwise fall back to neg_mask random
+                candidate = neg_mask
+                if boundary_band is not None and binary_erosion is not None:
+                    try:
+                        bnd = boundary_band(disc_region.astype(np.uint8), radius=2)
+                        interior = binary_erosion(disc_region.astype(bool), structure=np.ones((3, 3, 3), dtype=bool)).astype(np.uint8)
+                        candidate = ((bnd > 0) | (interior > 0)).astype(np.uint8)
+                        candidate = (candidate & (ldh_in_disc == 0)).astype(np.uint8)
+                        if candidate.sum() == 0:
+                            candidate = neg_mask
+                    except Exception:
+                        candidate = neg_mask
+
+                neg_centers = _sample_centers_from_mask(candidate, int(stageb_hardneg_per_posdisc))
+                for j, cneg in enumerate(neg_centers):
+                    img_roi_n, _, _ = crop_patch_zyx(img, cneg, stageb_roi_size, pad_value=0.0)
+                    disc_roi_n, _, _ = crop_patch_zyx(disc_region.astype(np.float32), cneg, stageb_roi_size, pad_value=0.0)
+                    idx_roi_n, _, _ = crop_patch_zyx(disc_index_map.astype(np.float32), cneg, stageb_roi_size, pad_value=0.0)
+                    zero = np.zeros(stageb_roi_size, dtype=np.float32)
+                    out_name_n = f"{sid}__disc{disc_label}__roi_neg{j}.npz"
+                    np.savez_compressed(
+                        out_b / out_name_n,
+                        image=img_roi_n.astype(np.float32),
+                        disc_mask=disc_roi_n.astype(np.float32),
+                        disc_index=idx_roi_n.astype(np.float32),
+                        ldh_mask=zero,
+                        sdm=zero,
+                        has_ldh=np.int8(0),
+                        disc_label=np.int16(disc_label),
+                        sample_id=np.array(sid, dtype="S"),
+                        patch_type=np.array("roi_neg", dtype="S"),
+                    )
+                    n_b += 1
+        else:
+            # Negatives for negative discs
+            if int(stageb_neg_per_disc) > 0:
+                candidate = disc_region.astype(np.uint8)
+                if boundary_band is not None and binary_erosion is not None:
+                    try:
+                        bnd = boundary_band(disc_region.astype(np.uint8), radius=2)
+                        interior = binary_erosion(disc_region.astype(bool), structure=np.ones((3, 3, 3), dtype=bool)).astype(np.uint8)
+                        candidate = ((bnd > 0) | (interior > 0)).astype(np.uint8)
+                        if candidate.sum() == 0:
+                            candidate = disc_region.astype(np.uint8)
+                    except Exception:
+                        candidate = disc_region.astype(np.uint8)
+
+                neg_centers = _sample_centers_from_mask(candidate, int(stageb_neg_per_disc))
+                for j, cneg in enumerate(neg_centers):
+                    img_roi_n, _, _ = crop_patch_zyx(img, cneg, stageb_roi_size, pad_value=0.0)
+                    disc_roi_n, _, _ = crop_patch_zyx(disc_region.astype(np.float32), cneg, stageb_roi_size, pad_value=0.0)
+                    idx_roi_n, _, _ = crop_patch_zyx(disc_index_map.astype(np.float32), cneg, stageb_roi_size, pad_value=0.0)
+                    zero = np.zeros(stageb_roi_size, dtype=np.float32)
+                    out_name_n = f"{sid}__disc{disc_label}__roi_neg{j}.npz"
+                    np.savez_compressed(
+                        out_b / out_name_n,
+                        image=img_roi_n.astype(np.float32),
+                        disc_mask=disc_roi_n.astype(np.float32),
+                        disc_index=idx_roi_n.astype(np.float32),
+                        ldh_mask=zero,
+                        sdm=zero,
+                        has_ldh=np.int8(0),
+                        disc_label=np.int16(disc_label),
+                        sample_id=np.array(sid, dtype="S"),
+                        patch_type=np.array("roi_neg", dtype="S"),
+                    )
+                    n_b += 1
 
     return n_a, n_b
 
@@ -812,16 +928,23 @@ def export_disc_patches_twostage(
     dst_dataset: Path,
     stagea_patch_size: tuple[int, int, int] = (96, 96, 96),
     stageb_roi_size: tuple[int, int, int] = (48, 48, 48),
+    stageb_neg_per_disc: int = 1,
+    stageb_hardneg_per_posdisc: int = 1,
     disc_labels: tuple[int, ...] = (91, 92, 93, 94, 95, 100),
     seed: int = 42,
     max_workers: int = 4,
 ):
     """
-    Create per-disc patches with mandatory 4-class sampling (StageA) and ROI patches for positives (StageB).
+    Create per-disc patches with mandatory 4-class sampling (StageA) and ROI patches for StageB.
 
     Output:
       - dst_dataset/ldh_twostage/stageA_patches/*.npz
       - dst_dataset/ldh_twostage/stageB_rois/*.npz
+
+    Scheme D (recommended):
+      Export StageB ROIs for BOTH positives and negatives so StageB learns to output empty masks.
+      - Positive disc: 1 positive ROI (center at GT LDH centroid) + `stageb_hardneg_per_posdisc` negative ROIs
+      - Negative disc: `stageb_neg_per_disc` negative ROIs
     """
     images_dir = dst_dataset / "imagesTr"
     ldh_labels_dir = dst_dataset / "labelsTr"
@@ -859,6 +982,8 @@ def export_disc_patches_twostage(
                 stageb_roi_size,
                 disc_labels,
                 seed,
+                int(stageb_neg_per_disc),
+                int(stageb_hardneg_per_posdisc),
             )
     else:
         # With mp.set_start_method('spawn') set at module import, this avoids fork-after-CUDA deadlocks.
@@ -874,6 +999,8 @@ def export_disc_patches_twostage(
             itertools.repeat(stageb_roi_size),
             itertools.repeat(disc_labels),
             itertools.repeat(seed),
+            itertools.repeat(int(stageb_neg_per_disc)),
+            itertools.repeat(int(stageb_hardneg_per_posdisc)),
             max_workers=max_workers,
             chunksize=1,
             desc="Extracting disc patches",
@@ -978,6 +1105,10 @@ def main():
                         help='StageA patch size (cube), default 96')
     parser.add_argument('--stageb-roi', type=int, default=48,
                         help='StageB ROI size (cube), default 48')
+    parser.add_argument('--stageb-neg-per-disc', type=int, default=1,
+                        help='Scheme D: number of negative StageB ROIs per negative disc (default: 1)')
+    parser.add_argument('--stageb-hardneg-per-posdisc', type=int, default=1,
+                        help='Scheme D: number of hard-negative StageB ROIs per positive disc (default: 1)')
     parser.add_argument('--no-aug', action='store_true', default=False,
                         help='Disable raw-level augmentation before Step2 inference')
     parser.add_argument('--augmentations-per-image', type=int, default=2,
@@ -1049,6 +1180,8 @@ def main():
         dst_dataset,
         stagea_patch_size=(args.stagea_patch, args.stagea_patch, args.stagea_patch),
         stageb_roi_size=(args.stageb_roi, args.stageb_roi, args.stageb_roi),
+        stageb_neg_per_disc=int(args.stageb_neg_per_disc),
+        stageb_hardneg_per_posdisc=int(args.stageb_hardneg_per_posdisc),
         max_workers=_patch_workers,
     )
     

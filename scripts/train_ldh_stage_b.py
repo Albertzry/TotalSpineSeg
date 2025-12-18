@@ -131,13 +131,25 @@ def _load_train_sample_ids(rois_dir: Path) -> set[str]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rois-dir", type=Path, required=True, help="Directory with StageB ROI .npz patches (positives)")
+    ap.add_argument("--rois-dir", type=Path, required=True, help="Directory with StageB ROI .npz patches (pos + optional neg)")
     ap.add_argument("--epochs", type=int, default=80)
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--num-workers", type=int, default=min(8, (os.cpu_count() or 8)))
     ap.add_argument("--prefetch-factor", type=int, default=4)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--val-ratio", type=float, default=0.1)
+    ap.add_argument(
+        "--use-negatives",
+        action="store_true",
+        default=False,
+        help="Scheme D: include negative StageB ROIs so the model learns to output empty masks.",
+    )
+    ap.add_argument(
+        "--neg-ratio",
+        type=float,
+        default=0.5,
+        help="Scheme D: target fraction of negatives in training sampler (0-1). Only used with --use-negatives.",
+    )
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--out", type=Path, required=True, help="Output checkpoint path (.pth)")
     args = ap.parse_args()
@@ -149,8 +161,8 @@ def main():
     train_sample_ids = _load_train_sample_ids(args.rois_dir)
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Stage B train split: {len(train_sample_ids)} samples (from imagesTr)")
     
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Stage B indexing ROIs (positives only)...")
-    ds = StageBDataset(args.rois_dir, filter_sample_ids=train_sample_ids)
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Stage B indexing ROIs (use_negatives={bool(args.use_negatives)})...")
+    ds = StageBDataset(args.rois_dir, filter_sample_ids=train_sample_ids, only_positive=not bool(args.use_negatives))
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Stage B ROIs indexed: n={len(ds)} (train split only)")
     n_val = max(1, int(len(ds) * args.val_ratio))
     n_train = len(ds) - n_val
@@ -168,7 +180,29 @@ def main():
     if int(args.num_workers) > 0:
         dl_kwargs["prefetch_factor"] = int(args.prefetch_factor)
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **dl_kwargs)
+    # Scheme D: sampler to control pos/neg ratio (otherwise negatives may dominate).
+    sampler = None
+    if bool(args.use_negatives):
+        neg_ratio = float(args.neg_ratio)
+        if not (0.0 < neg_ratio < 1.0):
+            raise ValueError("--neg-ratio must be in (0,1) when --use-negatives is set")
+        from torch.utils.data import WeightedRandomSampler
+
+        base = train_ds.dataset  # StageBDataset
+        idxs = list(map(int, train_ds.indices))
+        has = np.array([int(base.records[i].has_ldh) for i in idxs], dtype=np.int64)
+        n_pos = int((has == 1).sum())
+        n_neg = int((has == 0).sum())
+        if n_pos == 0 or n_neg == 0:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Stage B warning: n_pos={n_pos}, n_neg={n_neg}; disabling sampler.")
+            sampler = None
+        else:
+            w_pos = (1.0 - neg_ratio) / float(n_pos)
+            w_neg = neg_ratio / float(n_neg)
+            weights = torch.from_numpy(np.where(has == 1, w_pos, w_neg).astype(np.float32))
+            sampler = WeightedRandomSampler(weights=weights, num_samples=len(weights), replacement=True)
+
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=(sampler is None), sampler=sampler, **dl_kwargs)
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, **dl_kwargs)
     model = SmallUNet3D(in_channels=3).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -191,7 +225,7 @@ def main():
 
         model.train()
         train_losses = []
-        for x, mask_gt, sdm_gt in train_loader:
+        for x, mask_gt, sdm_gt, _has_ldh in train_loader:
             x = x.to(device)
             mask_gt = mask_gt.to(device)
             sdm_gt = sdm_gt.to(device)
@@ -206,19 +240,24 @@ def main():
         model.eval()
         dices = []
         val_losses = []
+        n_pos = 0
         with torch.no_grad():
-            for x, mask_gt, sdm_gt in val_loader:
+            for x, mask_gt, sdm_gt, has_ldh in val_loader:
                 x = x.to(device)
                 mask_gt = mask_gt.to(device)
                 sdm_gt = sdm_gt.to(device)
+                has_ldh = has_ldh.to(device)
                 mask_logits, sdm_pred = model(x)
                 vloss = stage_b_total_loss(mask_logits, sdm_pred, mask_gt, sdm_gt)
                 val_losses.append(float(vloss.item()))
-                pred = (torch.sigmoid(mask_logits) >= 0.5).float().cpu().numpy()[0, 0]
-                gt = mask_gt.detach().cpu().numpy()[0, 0]
-                dices.append(dice(pred, gt))
+                # Dice is meaningful on positives; negatives are handled via loss (FP suppression).
+                if int(has_ldh.item()) == 1 and float(mask_gt.sum().item()) > 0.0:
+                    n_pos += 1
+                    pred = (torch.sigmoid(mask_logits) >= 0.5).float().cpu().numpy()[0, 0]
+                    gt = mask_gt.detach().cpu().numpy()[0, 0]
+                    dices.append(dice(pred, gt))
 
-        mean_dice = float(np.nanmean(np.array(dices, dtype=np.float32)))
+        mean_dice = float(np.nanmean(np.array(dices, dtype=np.float32))) if dices else float("nan")
         mean_train_loss = sum(train_losses) / len(train_losses) if train_losses else 0.0
         mean_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0.0
         
@@ -235,7 +274,7 @@ def main():
         
         print(
             f"Epoch{epoch} | train_loss={mean_train_loss:.4f} | val_loss={mean_val_loss:.4f} | "
-            f"val dice={mean_dice:.3f}{best_marker}"
+            f"val dice={mean_dice:.3f} (pos={n_pos}){best_marker}"
         )
         epoch_time = time.time() - epoch_start
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Epoch{epoch} time={epoch_time:.1f}s")

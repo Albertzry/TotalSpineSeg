@@ -111,26 +111,39 @@ class StageADataset(Dataset):
 
 class StageBDataset(Dataset):
     """
-    Stage B: ROI fine segmentation (positives only).
+    Stage B: ROI fine segmentation (positives + optional hard negatives).
     Expects each .npz to already be the ROI patch with GT mask (+ optional SDM).
     """
 
-    def __init__(self, rois_dir: Path, filter_sample_ids: set[str] | None = None):
+    def __init__(
+        self,
+        rois_dir: Path,
+        filter_sample_ids: set[str] | None = None,
+        *,
+        only_positive: bool = True,
+    ):
         """
         Initialize Stage B dataset.
         
         Args:
             rois_dir: Directory containing .npz ROI patches
             filter_sample_ids: If provided, only load patches from these sample IDs (prevents data leakage)
+            only_positive: If True (default), keep only has_ldh==1 ROIs (legacy behavior).
+                           If False, include negatives as well (recommended for Scheme D).
         """
         records = index_patches(
             rois_dir, 
             desc="Indexing StageB rois",
             filter_sample_ids=filter_sample_ids
         )
-        self.records = [r for r in records if r.has_ldh == 1]
-        if len(self.records) == 0:
-            raise ValueError(f"no positive ROIs found in {rois_dir}")
+        if bool(only_positive):
+            self.records = [r for r in records if r.has_ldh == 1]
+            if len(self.records) == 0:
+                raise ValueError(f"no positive ROIs found in {rois_dir}")
+        else:
+            self.records = records
+            if len(self.records) == 0:
+                raise ValueError(f"no ROIs found in {rois_dir}")
 
     def __len__(self) -> int:
         return len(self.records)
@@ -144,6 +157,7 @@ class StageBDataset(Dataset):
         x = np.concatenate([img, disc, disc_idx], axis=0)
         mask = d["ldh_mask"].astype(np.float32)[None]
         sdm = d["sdm"].astype(np.float32)[None]
-        return torch.from_numpy(x), torch.from_numpy(mask), torch.from_numpy(sdm)
+        y = np.int64(rec.has_ldh)
+        return torch.from_numpy(x), torch.from_numpy(mask), torch.from_numpy(sdm), torch.tensor(y)
 
 

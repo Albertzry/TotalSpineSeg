@@ -204,7 +204,7 @@ for d in ${DATASETS[@]}; do
                 --patches-dir "$STAGEA_DIR" \
                 --out "$CKPT_A" \
                 --device "$DEVICE" \
-                --epochs 50 \
+                --epochs 30 \
                 --batch-size "$STAGEA_BATCH_SIZE" \
                 --num-workers "$STAGEA_WORKERS"
 
