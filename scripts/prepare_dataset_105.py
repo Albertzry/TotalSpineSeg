@@ -165,6 +165,7 @@ def _extract_patches_for_case_mp(
     disc_index_dir_str: str,
     out_a_str: str,
     out_b_str: str,
+    nnunet_roi_dir_str: str,
     stagea_patch_size: tuple[int, int, int],
     stageb_roi_size: tuple[int, int, int],
     disc_labels: tuple[int, ...],
@@ -184,6 +185,14 @@ def _extract_patches_for_case_mp(
     disc_index_dir = Path(disc_index_dir_str)
     out_a = Path(out_a_str)
     out_b = Path(out_b_str)
+    
+    # Dataset 107 paths (if provided)
+    images_tr_107 = None
+    labels_tr_107 = None
+    if nnunet_roi_dir_str and nnunet_roi_dir_str != "None":
+        nnunet_roi_dir = Path(nnunet_roi_dir_str)
+        images_tr_107 = nnunet_roi_dir / "imagesTr"
+        labels_tr_107 = nnunet_roi_dir / "labelsTr"
 
     seg_step2_path = step2_full_dir / f"{sid}.nii.gz"
     ldh_path = ldh_labels_dir / f"{sid}.nii.gz"
@@ -318,6 +327,24 @@ def _extract_patches_for_case_mp(
                 patch_type=np.array("roi", dtype="S"),
             )
             n_b += 1
+
+            # Save as nnUNet Dataset 107 sample (only positives for now, or include negatives?)
+            # Usually segmentation models are trained on positives or a mix.
+            # Here we save the positive ROI.
+            if images_tr_107 is not None and labels_tr_107 is not None:
+                roi_id = f"{sid}_disc{disc_label}"
+                # Use identity affine since these are cropped patches
+                affine = np.eye(4)
+                
+                # Channel 0: Image
+                nib.save(nib.Nifti1Image(img_roi.astype(np.float32), affine), images_tr_107 / f"{roi_id}_0000.nii.gz")
+                # Channel 1: Disc Mask
+                nib.save(nib.Nifti1Image(disc_roi.astype(np.float32), affine), images_tr_107 / f"{roi_id}_0001.nii.gz")
+                # Channel 2: Disc Index
+                nib.save(nib.Nifti1Image(idx_roi.astype(np.float32), affine), images_tr_107 / f"{roi_id}_0002.nii.gz")
+                
+                # Label: LDH Mask
+                nib.save(nib.Nifti1Image(ldh_roi.astype(np.uint8), affine), labels_tr_107 / f"{roi_id}.nii.gz")
 
             # Hard negatives for positive discs: sample centers from disc excluding LDH
             if int(stageb_hardneg_per_posdisc) > 0:
@@ -926,6 +953,7 @@ def run_step2_inference_and_postprocess(
 
 def export_disc_patches_twostage(
     dst_dataset: Path,
+    nnunet_roi_dir: Optional[Path] = None,
     stagea_patch_size: tuple[int, int, int] = (96, 96, 96),
     stageb_roi_size: tuple[int, int, int] = (48, 48, 48),
     stageb_neg_per_disc: int = 1,
@@ -940,6 +968,7 @@ def export_disc_patches_twostage(
     Output:
       - dst_dataset/ldh_twostage/stageA_patches/*.npz
       - dst_dataset/ldh_twostage/stageB_rois/*.npz
+      - (Optional) nnunet_roi_dir/imagesTr/*.nii.gz etc. for Dataset 107
 
     Scheme D (recommended):
       Export StageB ROIs for BOTH positives and negatives so StageB learns to output empty masks.
@@ -957,6 +986,11 @@ def export_disc_patches_twostage(
     out_b = out_root / "stageB_rois"
     out_a.mkdir(parents=True, exist_ok=True)
     out_b.mkdir(parents=True, exist_ok=True)
+    
+    nnunet_roi_dir_str = str(nnunet_roi_dir) if nnunet_roi_dir else "None"
+    if nnunet_roi_dir:
+        (nnunet_roi_dir / "imagesTr").mkdir(parents=True, exist_ok=True)
+        (nnunet_roi_dir / "labelsTr").mkdir(parents=True, exist_ok=True)
 
     img_paths = sorted(images_dir.glob("*_0000.nii.gz"))
     print(f"Processing {len(img_paths)} cases for patch extraction...")
@@ -978,6 +1012,7 @@ def export_disc_patches_twostage(
                 str(disc_index_dir),
                 str(out_a),
                 str(out_b),
+                nnunet_roi_dir_str,
                 stagea_patch_size,
                 stageb_roi_size,
                 disc_labels,
@@ -995,11 +1030,12 @@ def export_disc_patches_twostage(
             itertools.repeat(str(disc_index_dir)),
             itertools.repeat(str(out_a)),
             itertools.repeat(str(out_b)),
+            itertools.repeat(nnunet_roi_dir_str),
             itertools.repeat(stagea_patch_size),
             itertools.repeat(stageb_roi_size),
             itertools.repeat(disc_labels),
             itertools.repeat(seed),
-            itertools.repeat(int(stageb_neg_per_disc)),
+            itertools.repeat(int(stageb_neg_per_disc),),
             itertools.repeat(int(stageb_hardneg_per_posdisc)),
             max_workers=max_workers,
             chunksize=1,
@@ -1015,6 +1051,10 @@ def export_disc_patches_twostage(
     print(f"\n✓ Patch extraction completed:")
     print(f"  - StageA patches: {len(stagea_patches)}")
     print(f"  - StageB ROIs: {len(stageb_rois)}")
+    
+    if nnunet_roi_dir:
+        rois_107 = list((nnunet_roi_dir / "labelsTr").glob("*.nii.gz"))
+        print(f"  - Dataset 107 ROIs: {len(rois_107)}")
 
 
 def create_test_split(dst_dataset: Path, test_ratio: float = 0.1) -> None:
@@ -1091,6 +1131,34 @@ def create_dataset_json(dst_dataset: Path, resources_path: Path) -> None:
     print(f"Created dataset.json with {num_training} training samples")
 
 
+def create_dataset107_json(dst_dataset: Path) -> None:
+    """
+    Create dataset.json for Dataset 107 (LDH ROI)
+    """
+    labels_tr = dst_dataset / 'labelsTr'
+    num_training = len(list(labels_tr.glob('*.nii.gz')))
+    
+    dataset_json = {
+        "channel_names": {
+            "0": "MRI",
+            "1": "DiscMask",
+            "2": "DiscIndex"
+        },
+        "labels": {
+            "background": 0,
+            "LDH": 1
+        },
+        "numTraining": num_training,
+        "file_ending": ".nii.gz"
+    }
+    
+    output_path = dst_dataset / 'dataset.json'
+    with open(output_path, 'w') as f:
+        json.dump(dataset_json, f, indent=4)
+    
+    print(f"Created Dataset 107 dataset.json with {num_training} training samples")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Prepare Dataset 105 for LDH training')
     parser.add_argument(
@@ -1132,6 +1200,7 @@ def main():
     resources = totalspineseg / 'totalspineseg' / 'resources'
     
     dst_dataset = nnunet_raw / 'Dataset105_TotalSpineSeg_LDH'
+    dst_dataset_107 = nnunet_raw / 'Dataset107_LDH_ROI'
     
     mm = tuple(args.mm if len(args.mm) == 3 else [args.mm[0]] * 3)
     
@@ -1140,6 +1209,7 @@ def main():
     print("=" * 60)
     print(f"Raw source: {args.data_ori_root}")
     print(f"Destination: {dst_dataset}")
+    print(f"Destination (ROI): {dst_dataset_107}")
     print(f"Workers: {jobs}")
     print(f"Resample mm: {mm}")
     print(f"Augmentations per image: {0 if args.no_aug else args.augmentations_per_image}")
@@ -1157,6 +1227,7 @@ def main():
     
     # Create destination directory
     dst_dataset.mkdir(parents=True, exist_ok=True)
+    dst_dataset_107.mkdir(parents=True, exist_ok=True)
     
     # Step 1: Build Dataset105 from raw data_ori (copy/rename + preprocessing + optional augmentation)
     print("\nStep 1: Building Dataset105 from raw data_ori ...")
@@ -1178,6 +1249,7 @@ def main():
     print("\nExporting per-disc patches with mandatory 4-class sampling + ROI patches...")
     export_disc_patches_twostage(
         dst_dataset,
+        nnunet_roi_dir=dst_dataset_107,
         stagea_patch_size=(args.stagea_patch, args.stagea_patch, args.stagea_patch),
         stageb_roi_size=(args.stageb_roi, args.stageb_roi, args.stageb_roi),
         stageb_neg_per_disc=int(args.stageb_neg_per_disc),
@@ -1192,6 +1264,7 @@ def main():
     # Step 4: Create dataset.json
     print("\nStep 4: Creating dataset.json...")
     create_dataset_json(dst_dataset, resources)
+    create_dataset107_json(dst_dataset_107)
     
     # Clean up / keep intermediate directories
     print("\nCleaning up temporary directories...")
@@ -1206,6 +1279,7 @@ def main():
     print("Dataset 105 preparation completed!")
     print("=" * 60)
     print(f"\nDataset location: {dst_dataset}")
+    print(f"Dataset 107 (ROI) location: {dst_dataset_107}")
     print(f"Training samples: {len(list((dst_dataset / 'labelsTr').glob('*.nii.gz')))}")
     print(f"Test samples: {len(list((dst_dataset / 'labelsTs').glob('*.nii.gz')))}")
     print("\nNext steps:")

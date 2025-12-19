@@ -186,9 +186,17 @@ for d in ${DATASETS[@]}; do
             echo "Run: python scripts/prepare_dataset_105.py before training."
             exit 1
         fi
+        
+        # Check for Dataset 107 (LDH ROI) for nnUNet Stage B
+        DATASET107_DIR="$nnUNet_raw/Dataset107_LDH_ROI"
+        if [ ! -d "$DATASET107_DIR" ]; then
+             echo "ERROR: Dataset 107 (LDH ROI) not found at $DATASET107_DIR"
+             echo "Run: python scripts/prepare_dataset_105.py before training."
+             exit 1
+        fi
 
         CKPT_A="$CKPT_DIR/ldh_stageA_fold_${FOLD}.pth"
-        CKPT_B="$CKPT_DIR/ldh_stageB_fold_${FOLD}.pth"
+        # CKPT_B="$CKPT_DIR/ldh_stageB_fold_${FOLD}.pth" # No longer used for nnUNet Stage B
 
         # Throughput tuning for two-stage python trainers (override via env):
         # - STAGEA_BATCH_SIZE / STAGEB_BATCH_SIZE
@@ -196,8 +204,8 @@ for d in ${DATASETS[@]}; do
         DL_WORKERS_DEFAULT=$(( CORES < 12 ? CORES : 12 ))
         STAGEA_BATCH_SIZE="${STAGEA_BATCH_SIZE:-16}"
         STAGEA_WORKERS="${STAGEA_WORKERS:-$DL_WORKERS_DEFAULT}"
-        STAGEB_BATCH_SIZE="${STAGEB_BATCH_SIZE:-4}"
-        STAGEB_WORKERS="${STAGEB_WORKERS:-$DL_WORKERS_DEFAULT}"
+        # STAGEB_BATCH_SIZE="${STAGEB_BATCH_SIZE:-4}"
+        # STAGEB_WORKERS="${STAGEB_WORKERS:-$DL_WORKERS_DEFAULT}"
 
             echo "Stage A (disc-level detection) training..."
             PYTHONPATH="$TOTALSPINESEG:${PYTHONPATH:-}" python3 "$TOTALSPINESEG/scripts/train_ldh_stage_a.py" \
@@ -208,22 +216,22 @@ for d in ${DATASETS[@]}; do
                 --batch-size "$STAGEA_BATCH_SIZE" \
                 --num-workers "$STAGEA_WORKERS"
 
-            echo "Stage B (ROI fine segmentation) training..."
-            PYTHONPATH="$TOTALSPINESEG:${PYTHONPATH:-}" python3 "$TOTALSPINESEG/scripts/train_ldh_stage_b.py" \
-                --rois-dir "$STAGEB_DIR" \
-                --out "$CKPT_B" \
-                --device "$DEVICE" \
-                --epochs 500 \
-                --batch-size "$STAGEB_BATCH_SIZE" \
-                --num-workers "$STAGEB_WORKERS"
+            echo "Stage B (ROI fine segmentation) training using nnUNet (Dataset 107)..."
+            # Plan and Preprocess
+            # Using default planner and plans
+            nnUNetv2_plan_and_preprocess -d 107 -c 3d_fullres -np $JOBSNN --verify_dataset_integrity
+            
+            # Train
+            # Using default trainer (nnUNetTrainer) and plans (nnUNetPlans)
+            nnUNetv2_train 107 3d_fullres $FOLD -tr nnUNetTrainer -p nnUNetPlans -device $DEVICE
 
-            echo "Evaluation (disc-level recall, lesion-wise detection rate, Dice, ASD)..."
-            PYTHONPATH="$TOTALSPINESEG:${PYTHONPATH:-}" python3 "$TOTALSPINESEG/scripts/eval_ldh_twostage.py" \
-                --stagea-patches-dir "$STAGEA_DIR" \
-                --stageb-rois-dir "$STAGEB_DIR" \
-                --ckpt-stagea "$CKPT_A" \
-                --ckpt-stageb "$CKPT_B" \
-                --device "$DEVICE"
+            echo "Evaluation skipped for nnUNet Stage B (eval_ldh_twostage.py requires update)."
+            # PYTHONPATH="$TOTALSPINESEG:${PYTHONPATH:-}" python3 "$TOTALSPINESEG/scripts/eval_ldh_twostage.py" \
+            #    --stagea-patches-dir "$STAGEA_DIR" \
+            #    --stageb-rois-dir "$STAGEB_DIR" \
+            #    --ckpt-stagea "$CKPT_A" \
+            #    --ckpt-stageb "$CKPT_B" \
+            #    --device "$DEVICE"
 
         echo "Dataset 105 two-stage training completed."
         continue
