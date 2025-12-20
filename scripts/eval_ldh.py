@@ -23,11 +23,15 @@ if str(_repo_root) not in sys.path:
 
 import numpy as np
 import torch
+import tempfile
+import shutil
+import nibabel as nib
 from tqdm import tqdm
 
 from totalspineseg.ldh_twostage.losses import focal_loss_with_logits
 from totalspineseg.ldh_twostage.metrics import DetectionReport, average_surface_distance, dice
-from totalspineseg.ldh_twostage.models import SmallUNet3D, StageADetector
+from totalspineseg.ldh_twostage.models import StageADetector
+from totalspineseg.utils.predict_nnunet import predict_nnunet
 
 
 def load_npz(path: Path):
@@ -58,12 +62,46 @@ def _resolve_paths(args: argparse.Namespace) -> argparse.Namespace:
         if args.stageb_rois_dir is None:
             args.stageb_rois_dir = Path(data_root) / "stageB_rois"
 
-    if args.ckpt_dir is not None:
-        ckpt_dir = Path(args.ckpt_dir)
-        if args.ckpt_stagea is None:
-            args.ckpt_stagea = ckpt_dir / "ldh_stageA_fold_0.pth"
-        if args.ckpt_stageb is None:
-            args.ckpt_stageb = ckpt_dir / "ldh_stageB_fold_0.pth"
+    # Resolve Stage A checkpoint path
+    if args.ckpt_stagea is None:
+        if args.ckpt_dir is not None:
+            ckpt_dir = Path(args.ckpt_dir)
+            args.ckpt_stagea = ckpt_dir / f"ldh_stageA_fold_{args.fold_stagea}.pth"
+        else:
+            # Auto-resolve from $TOTALSPINESEG_DATA
+            totalspineseg_data = Path(os.environ.get("TOTALSPINESEG_DATA", ""))
+            if totalspineseg_data:
+                # Look for Dataset105_* in nnUNet/results
+                candidates = sorted((totalspineseg_data / "nnUNet" / "results").glob("Dataset105_*"))
+                if candidates:
+                    d105_name = candidates[0].name
+                    ckpt_dir = totalspineseg_data / "nnUNet" / "results" / d105_name / "ldh_twostage" / "checkpoints"
+                    args.ckpt_stagea = ckpt_dir / f"ldh_stageA_fold_{args.fold_stagea}.pth"
+
+    # Resolve Stage B model folder (nnUNet Dataset 107)
+    if args.model_folder_stageb is None:
+        totalspineseg_data = Path(os.environ.get("TOTALSPINESEG_DATA", ""))
+        if not totalspineseg_data:
+            raise SystemExit(
+                "无法自动解析 Stage B 模型路径。请提供 --model-folder-stageb 或设置 TOTALSPINESEG_DATA。"
+            )
+        # Look for Dataset107_* in nnUNet/results
+        candidates = sorted((totalspineseg_data / "nnUNet" / "results").glob("Dataset107_*"))
+        if not candidates:
+            raise SystemExit(
+                f"未找到 Dataset107_* 目录在 {totalspineseg_data/'nnUNet'/'results'}。\n"
+                "请确认已训练 Stage B (Dataset 107) 或手动指定 --model-folder-stageb。"
+            )
+        d107_name = candidates[0].name
+        # Model folder: Dataset107_*/nnUNetTrainer__nnUNetPlans__3d_fullres/
+        model_folder = totalspineseg_data / "nnUNet" / "results" / d107_name / "nnUNetTrainer__nnUNetPlans__3d_fullres"
+        if not model_folder.exists():
+            raise SystemExit(
+                f"未找到 Stage B 模型文件夹：{model_folder}\n"
+                "请确认已训练 Stage B (Dataset 107) 或手动指定 --model-folder-stageb。"
+            )
+        args.model_folder_stageb = model_folder
+    args.model_folder_stageb = Path(args.model_folder_stageb)
 
     missing = [
         name
@@ -71,7 +109,6 @@ def _resolve_paths(args: argparse.Namespace) -> argparse.Namespace:
             ("--stagea-patches-dir", args.stagea_patches_dir),
             ("--stageb-rois-dir", args.stageb_rois_dir),
             ("--ckpt-stagea", args.ckpt_stagea),
-            ("--ckpt-stageb", args.ckpt_stageb),
         )
         if value is None
     ]
@@ -81,7 +118,6 @@ def _resolve_paths(args: argparse.Namespace) -> argparse.Namespace:
     args.stagea_patches_dir = Path(args.stagea_patches_dir)
     args.stageb_rois_dir = Path(args.stageb_rois_dir)
     args.ckpt_stagea = Path(args.ckpt_stagea)
-    args.ckpt_stageb = Path(args.ckpt_stageb)
     return args
 
 
@@ -148,8 +184,27 @@ def main():
         default=None,
         help="Directory containing ldh_stageA_fold_0.pth and ldh_stageB_fold_0.pth.",
     )
-    ap.add_argument("--ckpt-stagea", type=Path, default=None)
-    ap.add_argument("--ckpt-stageb", type=Path, default=None)
+    ap.add_argument(
+        "--ckpt-stagea",
+        type=Path,
+        default=None,
+        help="Stage A checkpoint (.pth). If omitted, auto-resolves from --ckpt-dir or $TOTALSPINESEG_DATA.",
+    )
+    ap.add_argument(
+        "--fold-stagea",
+        type=int,
+        default=0,
+        help="Fold number for Stage A checkpoint (default: 0).",
+    )
+    ap.add_argument("--ckpt-stageb", type=Path, default=None, help="DEPRECATED: Stage B now uses nnUNet (Dataset 107). Use --model-folder-stageb instead.")
+    ap.add_argument(
+        "--model-folder-stageb",
+        type=Path,
+        default=None,
+        help="nnUNet model folder for Stage B (Dataset 107). Default: auto-resolve from $TOTALSPINESEG_DATA/nnUNet/results/Dataset107_*/nnUNetTrainer__nnUNetPlans__3d_fullres/",
+    )
+    ap.add_argument("--fold-stageb", type=int, default=0, help="Fold number for Stage B nnUNet model (default: 0).")
+    ap.add_argument("--checkpoint-stageb", type=str, default="checkpoint_best.pth", help="Checkpoint name for Stage B (default: checkpoint_best.pth).")
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--thresh", type=float, default=0.5)
     ap.add_argument(
@@ -172,7 +227,9 @@ def main():
     print(f"  stageA_patches_dir: {args.stagea_patches_dir}")
     print(f"  stageB_rois_dir:    {args.stageb_rois_dir}")
     print(f"  ckpt_stagea:        {args.ckpt_stagea}")
-    print(f"  ckpt_stageb:        {args.ckpt_stageb}")
+    print(f"  model_folder_stageb: {args.model_folder_stageb}")
+    print(f"  fold_stageb:        {args.fold_stageb}")
+    print(f"  checkpoint_stageb:  {args.checkpoint_stageb}")
     print(f"  split:              {args.split}")
 
     dataset_root = _dataset_root_from_ldh_twostage_root(args.stagea_patches_dir.parent)
@@ -229,38 +286,85 @@ def main():
     print(f"  counts: tp={rep.tp} fp={rep.fp} tn={rep.tn} fn={rep.fn}")
     print(f"  lesion-wise detection rate (proxy): {rep.recall:.3f}")
 
-    # ---------------- Stage B (ROI segmentation) ----------------
-    seg = SmallUNet3D(in_channels=3).to(device)
-    seg.load_state_dict(torch.load(args.ckpt_stageb, map_location="cpu")["model"])
-    seg.eval()
-
+    # ---------------- Stage B (ROI segmentation using nnUNet) ----------------
     dices = []
     asds = []
     stageb_files_all = sorted(args.stageb_rois_dir.glob("*.npz"))
     stageb_files = _filter_files_by_split(stageb_files_all, split_ids)
     n_pos = 0
-    print(f"Stage B: evaluating {len(stageb_files)} ROI files (filtered from {len(stageb_files_all)} total, positives only for metrics)...")
-    for p in tqdm(stageb_files, desc="Stage B ROIs", unit="roi"):
+    
+    # Filter positive ROIs only
+    positive_files = []
+    for p in stageb_files:
         d = load_npz(p)
-        sid = str(d.get("sample_id", b"unknown").astype("S").tobytes().decode(errors="ignore")) if "sample_id" in d else "unknown"
-        if int(d.get("has_ldh", 0)) != 1:
-            continue
-        n_pos += 1
-        x = np.stack(
-            [d["image"].astype(np.float32), d["disc_mask"].astype(np.float32), d["disc_index"].astype(np.float32)],
-            axis=0,
-        )[None]
-        gt = d["ldh_mask"].astype(np.float32)
-        with torch.no_grad():
-            mask_logits, _sdm_pred = seg(torch.from_numpy(x).to(device))
-            pred = (torch.sigmoid(mask_logits) >= args.thresh).float().cpu().numpy()[0, 0]
-        dices.append(dice(pred, gt))
-        asds.append(average_surface_distance(pred, gt))
+        if int(d.get("has_ldh", 0)) == 1:
+            positive_files.append(p)
+    
+    print(f"Stage B: evaluating {len(positive_files)} positive ROI files (filtered from {len(stageb_files_all)} total)...")
+    
+    if len(positive_files) == 0:
+        print("Stage B: No positive ROIs found. Skipping Stage B evaluation.")
+    else:
+        # Create temporary directories for nnUNet inference
+        with tempfile.TemporaryDirectory(prefix="eval_ldh_stageb_") as tmpdir:
+            tmp_images = Path(tmpdir) / "images"
+            tmp_output = Path(tmpdir) / "output"
+            tmp_images.mkdir(parents=True, exist_ok=True)
+            tmp_output.mkdir(parents=True, exist_ok=True)
+            
+            # Prepare 3-channel NIfTI files for each ROI
+            roi_id_to_gt = {}
+            for p in tqdm(positive_files, desc="Preparing ROIs for nnUNet", unit="roi"):
+                d = load_npz(p)
+                sid = str(d.get("sample_id", b"unknown").astype("S").tobytes().decode(errors="ignore")) if "sample_id" in d else "unknown"
+                disc_label = int(d.get("disc_label", -1))
+                roi_id = f"{sid}_disc{disc_label}"
+                
+                # Save 3-channel input
+                affine = np.eye(4)
+                nib.save(nib.Nifti1Image(d["image"].astype(np.float32), affine), tmp_images / f"{roi_id}_0000.nii.gz")
+                nib.save(nib.Nifti1Image(d["disc_mask"].astype(np.float32), affine), tmp_images / f"{roi_id}_0001.nii.gz")
+                nib.save(nib.Nifti1Image(d["disc_index"].astype(np.float32), affine), tmp_images / f"{roi_id}_0002.nii.gz")
+                
+                # Store GT mask
+                roi_id_to_gt[roi_id] = d["ldh_mask"].astype(np.float32)
+            
+            # Run nnUNet inference
+            print("Running nnUNet inference for Stage B...")
+            predict_nnunet(
+                model_folder=args.model_folder_stageb,
+                images_dir=tmp_images,
+                output_dir=tmp_output,
+                device=device,
+                folds=(args.fold_stageb,),
+                checkpoint=args.checkpoint_stageb,
+                npp=1,
+                nps=1,
+                disable_tta=False,
+                verbose=False,
+                disable_progress_bar=False,
+            )
+            
+            # Load predictions and compute metrics
+            for roi_id, gt in tqdm(roi_id_to_gt.items(), desc="Computing metrics", unit="roi"):
+                pred_path = tmp_output / f"{roi_id}.nii.gz"
+                if not pred_path.exists():
+                    continue
+                n_pos += 1
+                pred_nii = nib.load(str(pred_path))
+                pred = np.asanyarray(pred_nii.dataobj).astype(np.float32)
+                # nnUNet outputs class labels (0=background, 1=LDH), convert to binary mask
+                pred = (pred >= 0.5).astype(np.float32)
+                dices.append(dice(pred, gt))
+                asds.append(average_surface_distance(pred, gt))
 
     print("Stage B (ROI fine segmentation, positives only):")
     print(f"  positives evaluated: {n_pos}")
-    print(f"  Dice (secondary): {float(np.nanmean(np.array(dices))):.3f}")
-    print(f"  ASD: {float(np.nanmean(np.array(asds))):.3f}")
+    if n_pos > 0:
+        print(f"  Dice (secondary): {float(np.nanmean(np.array(dices))):.3f}")
+        print(f"  ASD: {float(np.nanmean(np.array(asds))):.3f}")
+    else:
+        print("  No positive ROIs evaluated.")
 
 
 if __name__ == "__main__":

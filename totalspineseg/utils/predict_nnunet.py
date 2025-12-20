@@ -247,6 +247,12 @@ def predict_nnunet(
     folds = [i if i == 'all' else int(i) for i in folds]
     assert part_id < num_parts
 
+    # Convert to Path objects if strings
+    from pathlib import Path
+    model_folder = Path(model_folder) if isinstance(model_folder, str) else model_folder
+    images_dir = Path(images_dir) if isinstance(images_dir, str) else images_dir
+    output_dir = Path(output_dir) if isinstance(output_dir, str) else output_dir
+
     # Create output folder if does not exists
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -278,7 +284,7 @@ def predict_nnunet(
                                 allow_tqdm=not disable_progress_bar)
     
     predictor.initialize_from_trained_model_folder(
-        model_folder,
+        str(model_folder),
         folds,
         checkpoint_name=checkpoint
     )

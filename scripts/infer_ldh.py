@@ -23,12 +23,14 @@ import argparse
 import json
 import os
 import shutil
+import tempfile
 import multiprocessing as mp
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
+from tqdm import tqdm
 
 # Add repository root to Python path for imports (so `python scripts/infer_ldh.py ...` works)
 _script_dir = Path(__file__).parent.resolve()
@@ -362,12 +364,31 @@ def _resolve_dataset105_name(totalspineseg_data: Path) -> str:
     return candidates[0].name
 
 
-def _default_ckpt_paths(*, totalspineseg_data: Path, fold: int) -> tuple[Path, Path]:
+def _default_ckpt_paths(*, totalspineseg_data: Path, fold: int) -> tuple[Path, Path | None]:
     d105 = _resolve_dataset105_name(Path(totalspineseg_data))
     ckpt_dir = Path(totalspineseg_data) / "nnUNet" / "results" / d105 / "ldh_twostage" / "checkpoints"
     ckpt_a = ckpt_dir / f"ldh_stageA_fold_{int(fold)}.pth"
-    ckpt_b = ckpt_dir / f"ldh_stageB_fold_{int(fold)}.pth"
+    # Stage B now uses nnUNet, not a .pth checkpoint
+    ckpt_b = None
     return ckpt_a, ckpt_b
+
+
+def _default_model_folder_stageb(*, totalspineseg_data: Path) -> Path:
+    """Resolve default Stage B nnUNet model folder (Dataset 107)."""
+    candidates = sorted((totalspineseg_data / "nnUNet" / "results").glob("Dataset107_*"))
+    if not candidates:
+        raise SystemExit(
+            f"未找到 Dataset107_* 目录在 {totalspineseg_data/'nnUNet'/'results'}。\n"
+            "请确认已训练 Stage B (Dataset 107) 或手动指定 --model-folder-stageb。"
+        )
+    d107_name = candidates[0].name
+    model_folder = totalspineseg_data / "nnUNet" / "results" / d107_name / "nnUNetTrainer__nnUNetPlans__3d_fullres"
+    if not model_folder.exists():
+        raise SystemExit(
+            f"未找到 Stage B 模型文件夹：{model_folder}\n"
+            "请确认已训练 Stage B (Dataset 107) 或手动指定 --model-folder-stageb。"
+        )
+    return model_folder
 
 
 def main() -> None:
@@ -378,7 +399,14 @@ def main() -> None:
     ap.add_argument("--data-dir", type=Path, default=None, help="TotalSpineSeg data dir（默认读 $TOTALSPINESEG_DATA）。")
     ap.add_argument("--fold", type=int, default=0, help="使用哪一个 fold 的 checkpoint（默认 0）。")
     ap.add_argument("--ckpt-stagea", type=Path, default=None, help="Stage A checkpoint (.pth)，可覆盖默认路径。")
-    ap.add_argument("--ckpt-stageb", type=Path, default=None, help="Stage B checkpoint (.pth)，可覆盖默认路径。")
+    ap.add_argument("--ckpt-stageb", type=Path, default=None, help="DEPRECATED: Stage B 现在使用 nnUNet (Dataset 107)。请使用 --model-folder-stageb。")
+    ap.add_argument(
+        "--model-folder-stageb",
+        type=Path,
+        default=None,
+        help="Stage B 的 nnUNet 模型文件夹（Dataset 107）。默认：从 $TOTALSPINESEG_DATA/nnUNet/results/Dataset107_*/nnUNetTrainer__nnUNetPlans__3d_fullres/ 自动解析。",
+    )
+    ap.add_argument("--checkpoint-stageb", type=str, default="checkpoint_best.pth", help="Stage B 的 checkpoint 名称（默认：checkpoint_best.pth）。")
     ap.add_argument(
         "--device",
         type=str,
@@ -438,7 +466,8 @@ def main() -> None:
     from totalspineseg.init_inference import init_inference
     from totalspineseg.inference import inference as tss_inference
     from totalspineseg.ldh_twostage.disc_index import DiscIndexSpec, make_disc_index_map_from_step2_full_labels
-    from totalspineseg.ldh_twostage.models import SmallUNet3D, StageADetector
+    from totalspineseg.ldh_twostage.models import StageADetector
+    from totalspineseg.utils.predict_nnunet import predict_nnunet
     from totalspineseg.utils.transform_seg2image import transform_seg2image_mp
     from totalspineseg.utils.utils import ZIP_URLS
 
@@ -475,26 +504,35 @@ def main() -> None:
             raise SystemExit(f"--device 仅支持 cuda/cpu，当前={args.device!r}")
     device = torch.device(dev_str)
 
-    # Resolve checkpoints (default: under $TOTALSPINESEG_DATA/nnUNet/results/Dataset105_*/ldh_twostage/checkpoints/)
+    # Resolve Stage A checkpoint
     ckpt_stagea = args.ckpt_stagea
-    ckpt_stageb = args.ckpt_stageb
-    if ckpt_stagea is None or ckpt_stageb is None:
-        ckpt_a_def, ckpt_b_def = _default_ckpt_paths(totalspineseg_data=data_dir, fold=int(args.fold))
-        if ckpt_stagea is None:
-            ckpt_stagea = ckpt_a_def
-        if ckpt_stageb is None:
-            ckpt_stageb = ckpt_b_def
+    if ckpt_stagea is None:
+        ckpt_a_def, _ = _default_ckpt_paths(totalspineseg_data=data_dir, fold=int(args.fold))
+        ckpt_stagea = ckpt_a_def
     ckpt_stagea = Path(ckpt_stagea).resolve()
-    ckpt_stageb = Path(ckpt_stageb).resolve()
-    if not ckpt_stagea.is_file() or not ckpt_stageb.is_file():
+    if not ckpt_stagea.is_file():
         raise SystemExit(
-            "未找到 StageA/StageB checkpoint（自动解析失败）。\n"
+            "未找到 StageA checkpoint（自动解析失败）。\n"
             f"  期望 StageA: {ckpt_stagea}\n"
-            f"  期望 StageB: {ckpt_stageb}\n"
             "请确认：\n"
             "  - 已设置 TOTALSPINESEG_DATA，且训练输出位于 nnUNet/results/Dataset105_*/ldh_twostage/checkpoints/\n"
             "或显式指定：\n"
-            "  --ckpt-stagea /path/to/ldh_stageA_fold_0.pth --ckpt-stageb /path/to/ldh_stageB_fold_0.pth\n"
+            "  --ckpt-stagea /path/to/ldh_stageA_fold_0.pth\n"
+        )
+    
+    # Resolve Stage B model folder (nnUNet Dataset 107)
+    model_folder_stageb = args.model_folder_stageb
+    if model_folder_stageb is None:
+        model_folder_stageb = _default_model_folder_stageb(totalspineseg_data=data_dir)
+    model_folder_stageb = Path(model_folder_stageb).resolve()
+    if not model_folder_stageb.is_dir():
+        raise SystemExit(
+            "未找到 StageB 模型文件夹（自动解析失败）。\n"
+            f"  期望 StageB: {model_folder_stageb}\n"
+            "请确认：\n"
+            "  - 已设置 TOTALSPINESEG_DATA，且训练输出位于 nnUNet/results/Dataset107_*/nnUNetTrainer__nnUNetPlans__3d_fullres/\n"
+            "或显式指定：\n"
+            "  --model-folder-stageb /path/to/nnUNetTrainer__nnUNetPlans__3d_fullres\n"
         )
 
     # Step1+Step2 inference (creates preview + step folders similar to original)
@@ -532,14 +570,12 @@ def main() -> None:
     ldh_out_dir.mkdir(parents=True, exist_ok=True)
     preview_ldh_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load Stage A/B models
+    # Load Stage A model
     det = StageADetector(in_channels=3).to(device)
     det.load_state_dict(torch.load(ckpt_stagea, map_location="cpu")["model"])
     det.eval()
-
-    seg = SmallUNet3D(in_channels=3).to(device)
-    seg.load_state_dict(torch.load(ckpt_stageb, map_location="cpu")["model"])
-    seg.eval()
+    
+    # Stage B uses nnUNet, will be initialized during inference
 
     patch_a = (int(args.patch_a), int(args.patch_a), int(args.patch_a))
     roi_b = (int(args.roi_b), int(args.roi_b), int(args.roi_b))
@@ -555,18 +591,22 @@ def main() -> None:
         "input_dir": str(input_dir),
         "output_dir": str(out_dir),
         "ckpt_stagea": str(ckpt_stagea),
-        "ckpt_stageb": str(ckpt_stageb),
+        "model_folder_stageb": str(model_folder_stageb),
+        "checkpoint_stageb": str(args.checkpoint_stageb),
         "thresh_a": float(args.thresh_a),
         "thresh_b": float(args.thresh_b),
         "disc_labels": list(map(int, args.disc_labels)),
         "cases": [],
     }
 
+    # Stage A: Run detection for all cases and collect positive ROIs for Stage B
+    case_data: Dict[str, Dict] = {}
+    all_rois: List[Dict] = []  # List of ROI metadata for batch Stage B inference
+    
     for img_path in iso_images:
         case_id = img_path.name.replace("_0000.nii.gz", "")
         step2_path = out_dir / "step2_output" / f"{case_id}.nii.gz"
         if not step2_path.exists():
-            # If step2 missing, skip
             continue
 
         img_nii = nib.load(str(img_path))
@@ -578,9 +618,9 @@ def main() -> None:
         disc_index_nii = make_disc_index_map_from_step2_full_labels(step2_nii, spec=spec, normalize=True)
         disc_index_map = np.asanyarray(disc_index_nii.dataobj).astype(np.float32)
 
-        ldh_pred_iso = np.zeros(step2.shape, dtype=np.uint8)
         decisions: List[DiscDecision] = []
         debug_top_centers: Dict[str, List[Dict[str, object]]] = {}
+        case_rois: List[Dict] = []  # ROIs for this case
 
         for disc_label in list(map(int, args.disc_labels)):
             disc_region = _disc_region_from_step2(step2, disc_label)
@@ -641,36 +681,115 @@ def main() -> None:
             if not positive:
                 continue
 
-            # Stage B on top-K centers (default 1)
-            with torch.no_grad():
-                for k in range(int(max(1, args.topk_b))):
-                    if k >= len(probs_sorted):
-                        break
-                    center_k = probs_sorted[k][0]
-                    img_roi, start, end, pad_before = _crop_with_padding(img, center_k, roi_b, pad_value=0.0)
-                    disc_roi, _, _, _ = _crop_with_padding(disc_region.astype(np.float32), center_k, roi_b, pad_value=0.0)
-                    idx_roi, _, _, _ = _crop_with_padding(disc_index_map.astype(np.float32), center_k, roi_b, pad_value=0.0)
-                    x = np.stack([img_roi, disc_roi, idx_roi], axis=0)[None]
-                    mask_logits, _sdm = seg(torch.from_numpy(x).to(device))
-                    roi_pred = (torch.sigmoid(mask_logits) >= float(args.thresh_b)).float().cpu().numpy()[0, 0].astype(np.uint8)
+            # Collect ROIs for Stage B (top-K centers)
+            for k in range(int(max(1, args.topk_b))):
+                if k >= len(probs_sorted):
+                    break
+                center_k = probs_sorted[k][0]
+                img_roi, start, end, pad_before = _crop_with_padding(img, center_k, roi_b, pad_value=0.0)
+                disc_roi, _, _, _ = _crop_with_padding(disc_region.astype(np.float32), center_k, roi_b, pad_value=0.0)
+                idx_roi, _, _, _ = _crop_with_padding(disc_index_map.astype(np.float32), center_k, roi_b, pad_value=0.0)
+                
+                roi_id = f"{case_id}_disc{disc_label}_k{k}"
+                case_rois.append({
+                    "roi_id": roi_id,
+                    "case_id": case_id,
+                    "disc_label": disc_label,
+                    "center": center_k,
+                    "start": start,
+                    "end": end,
+                    "pad_before": pad_before,
+                    "img_roi": img_roi,
+                    "disc_roi": disc_roi,
+                    "idx_roi": idx_roi,
+                })
+                all_rois.append(case_rois[-1])
 
-                    roi_unpadded = _uncrop_remove_padding(roi_pred, start, end, pad_before)
-                    # Hard constraint: clip prediction to disc region (strong anatomy prior).
-                    # This suppresses spurious positives that spill outside the disc ROI when running on full spine volumes.
-                    if not bool(args.no_clip_to_disc):
-                        disc_roi_u8 = (disc_roi >= 0.5).astype(np.uint8)
-                        disc_roi_unpadded = _uncrop_remove_padding(disc_roi_u8, start, end, pad_before)
-                        roi_unpadded = (roi_unpadded & disc_roi_unpadded).astype(np.uint8)
-                    z0c, y0c, x0c = start
-                    z1c, y1c, x1c = end
-                    ldh_pred_iso[z0c:z1c, y0c:y1c, x0c:x1c] = np.maximum(
-                        ldh_pred_iso[z0c:z1c, y0c:y1c, x0c:x1c],
-                        roi_unpadded,
-                    )
+        case_data[case_id] = {
+            "img_nii": img_nii,
+            "img": img,
+            "step2": step2,
+            "decisions": decisions,
+            "debug_top_centers": debug_top_centers,
+            "rois": case_rois,
+        }
 
-        # Save per-case outputs
+    # Stage B: Batch nnUNet inference for all collected ROIs
+    if len(all_rois) > 0:
+        with tempfile.TemporaryDirectory(prefix="infer_ldh_stageb_") as tmpdir:
+            tmp_images = Path(tmpdir) / "images"
+            tmp_output = Path(tmpdir) / "output"
+            tmp_images.mkdir(parents=True, exist_ok=True)
+            tmp_output.mkdir(parents=True, exist_ok=True)
+            
+            # Prepare 3-channel NIfTI files
+            print(f"准备 {len(all_rois)} 个 ROI 用于 Stage B 推理...")
+            for roi_info in tqdm(all_rois, desc="准备 ROI", unit="roi"):
+                roi_id = roi_info["roi_id"]
+                affine = np.eye(4)
+                nib.save(nib.Nifti1Image(roi_info["img_roi"].astype(np.float32), affine), tmp_images / f"{roi_id}_0000.nii.gz")
+                nib.save(nib.Nifti1Image(roi_info["disc_roi"].astype(np.float32), affine), tmp_images / f"{roi_id}_0001.nii.gz")
+                nib.save(nib.Nifti1Image(roi_info["idx_roi"].astype(np.float32), affine), tmp_images / f"{roi_id}_0002.nii.gz")
+            
+            # Run nnUNet inference
+            print("运行 Stage B nnUNet 推理...")
+            predict_nnunet(
+                model_folder=str(model_folder_stageb),
+                images_dir=str(tmp_images),
+                output_dir=str(tmp_output),
+                device=device,
+                folds=(args.fold,),
+                checkpoint=args.checkpoint_stageb,
+                npp=1,
+                nps=1,
+                disable_tta=False,
+                verbose=False,
+                disable_progress_bar=False,
+            )
+            
+            # Load predictions and merge back to full images
+            print("合并 Stage B 预测结果...")
+            for roi_info in tqdm(all_rois, desc="合并结果", unit="roi"):
+                roi_id = roi_info["roi_id"]
+                case_id = roi_info["case_id"]
+                pred_path = tmp_output / f"{roi_id}.nii.gz"
+                if not pred_path.exists():
+                    continue
+                
+                pred_nii = nib.load(str(pred_path))
+                pred = np.asanyarray(pred_nii.dataobj).astype(np.float32)
+                # nnUNet outputs class labels (0=background, 1=LDH), convert to binary mask
+                roi_pred = (pred >= float(args.thresh_b)).astype(np.uint8)
+                
+                # Unpad and merge
+                start = roi_info["start"]
+                end = roi_info["end"]
+                pad_before = roi_info["pad_before"]
+                roi_unpadded = _uncrop_remove_padding(roi_pred, start, end, pad_before)
+                
+                # Hard constraint: clip prediction to disc region
+                if not bool(args.no_clip_to_disc):
+                    disc_roi_u8 = (roi_info["disc_roi"] >= 0.5).astype(np.uint8)
+                    disc_roi_unpadded = _uncrop_remove_padding(disc_roi_u8, start, end, pad_before)
+                    roi_unpadded = (roi_unpadded & disc_roi_unpadded).astype(np.uint8)
+                
+                # Merge into case's full prediction
+                if case_id not in case_data:
+                    continue
+                z0c, y0c, x0c = start
+                z1c, y1c, x1c = end
+                if "ldh_pred_iso" not in case_data[case_id]:
+                    case_data[case_id]["ldh_pred_iso"] = np.zeros(case_data[case_id]["step2"].shape, dtype=np.uint8)
+                case_data[case_id]["ldh_pred_iso"][z0c:z1c, y0c:y1c, x0c:x1c] = np.maximum(
+                    case_data[case_id]["ldh_pred_iso"][z0c:z1c, y0c:y1c, x0c:x1c],
+                    roi_unpadded,
+                )
+
+    # Save per-case outputs
+    for case_id, data in case_data.items():
+        ldh_pred_iso = data.get("ldh_pred_iso", np.zeros(data["step2"].shape, dtype=np.uint8))
         iso_mask_path = stageb_iso_dir / f"{case_id}.nii.gz"
-        iso_nii = nib.Nifti1Image(ldh_pred_iso.astype(np.uint8), img_nii.affine, img_nii.header)
+        iso_nii = nib.Nifti1Image(ldh_pred_iso.astype(np.uint8), data["img_nii"].affine, data["img_nii"].header)
         iso_nii.set_data_dtype(np.uint8)
         iso_nii.set_qform(iso_nii.affine)
         iso_nii.set_sform(iso_nii.affine)
@@ -681,13 +800,14 @@ def main() -> None:
             "case_id": case_id,
             "thresh_a": float(args.thresh_a),
             "disc_labels": list(map(int, args.disc_labels)),
-            "decisions": [asdict(d) for d in decisions],
-            "debug_top_centers": debug_top_centers,
+            "decisions": [asdict(d) for d in data["decisions"]],
+            "debug_top_centers": data["debug_top_centers"],
         }
         with open(stagea_report_path, "w", encoding="utf-8") as f:
             json.dump(stagea_report, f, ensure_ascii=False, indent=2)
 
         # LDH preview (red overlay) in iso space (same slice logic as preview_jpg)
+        img_path = out_dir / "input" / f"{case_id}_0000.nii.gz"
         out_jpg = preview_ldh_dir / f"{case_id}_{args.preview_orient}_{args.preview_sliceloc}_ldh.jpg"
         _save_ldh_preview_red(
             image_path=img_path,
@@ -698,6 +818,7 @@ def main() -> None:
             alpha=float(args.preview_alpha),
         )
 
+        step2_path = out_dir / "step2_output" / f"{case_id}.nii.gz"
         summary["cases"].append(
             {
                 "case_id": case_id,
