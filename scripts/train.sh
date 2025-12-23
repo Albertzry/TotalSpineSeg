@@ -202,15 +202,14 @@ for d in ${DATASETS[@]}; do
         # - STAGEA_BATCH_SIZE / STAGEB_BATCH_SIZE
         # - STAGEA_WORKERS / STAGEB_WORKERS
         DL_WORKERS_DEFAULT=$(( CORES < 12 ? CORES : 12 ))
-        STAGEA_BATCH_SIZE="${STAGEA_BATCH_SIZE:-16}"
+        STAGEA_BATCH_SIZE="${STAGEA_BATCH_SIZE:-8}"
         STAGEA_WORKERS="${STAGEA_WORKERS:-$DL_WORKERS_DEFAULT}"
         # STAGEB_BATCH_SIZE="${STAGEB_BATCH_SIZE:-4}"
         # STAGEB_WORKERS="${STAGEB_WORKERS:-$DL_WORKERS_DEFAULT}"
 
             echo "Stage A (disc-level detection) training..."
             PYTHONPATH="$TOTALSPINESEG:${PYTHONPATH:-}" python3 "$TOTALSPINESEG/scripts/train_ldh_stage_a.py" \
-                --patches-dir "$STAGEA_DIR" \
-                --out "$CKPT_A" \
+                --fold "$FOLD" \
                 --device "$DEVICE" \
                 --epochs 30 \
                 --batch-size "$STAGEA_BATCH_SIZE" \

@@ -427,7 +427,7 @@ def main() -> None:
         help="默认会把 StageB 的预测硬限制在椎间盘区域内（抑制假阳性）。加上该参数可关闭此约束用于对比。",
     )
     ap.add_argument("--patch-a", type=int, default=96)
-    ap.add_argument("--roi-b", type=int, default=48)
+    ap.add_argument("--roi-b", type=int, default=64, help="Stage B ROI size (cube), default 64 (should match Dataset107 ROI size)")
     # Default: restrict to the two most common lumbar LDH levels (L4/L5 and L5/S1)
     # - L4/L5 -> disc label 95
     # - L5/S  -> disc label 100

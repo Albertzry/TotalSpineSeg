@@ -36,7 +36,7 @@ import matplotlib.pyplot as plt
 from totalspineseg.ldh_twostage.data import StageADataset
 from totalspineseg.ldh_twostage.losses import focal_loss_with_logits
 from totalspineseg.ldh_twostage.metrics import DetectionReport
-from totalspineseg.ldh_twostage.models import StageADetector
+from totalspineseg.ldh_twostage.models import StageADetectorV2
 
 
 def _save_training_curves(history: dict, out_ckpt: Path) -> Path:
@@ -141,16 +141,84 @@ def _load_train_sample_ids(patches_dir: Path) -> set[str]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--patches-dir", type=Path, required=True, help="Directory with StageA .npz patches")
+    ap.add_argument(
+        "--patches-dir",
+        type=Path,
+        default=None,
+        help="Directory with StageA .npz patches. Auto-resolves from $TOTALSPINESEG_DATA if not provided.",
+    )
     ap.add_argument("--epochs", type=int, default=30)
-    ap.add_argument("--batch-size", type=int, default=4)
+    ap.add_argument("--batch-size", type=int, default=8, help="Batch size (default: 8, increased for 24G GPU)")
     ap.add_argument("--num-workers", type=int, default=min(8, (os.cpu_count() or 8)))
     ap.add_argument("--prefetch-factor", type=int, default=4)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--val-ratio", type=float, default=0.1)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    ap.add_argument("--out", type=Path, required=True, help="Output checkpoint path (.pth)")
+    ap.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Output checkpoint path (.pth). Auto-resolves from $TOTALSPINESEG_DATA if not provided.",
+    )
+    ap.add_argument("--fold", type=int, default=0, help="Fold number (default: 0)")
+    # Stage A now defaults to (and only supports) v2 in codebase
+    ap.add_argument(
+        "--arch",
+        type=str,
+        default="v2",
+        choices=["v2"],
+        help="Stage A detector architecture (v2 residual CNN).",
+    )
+    ap.add_argument("--base", type=int, default=32, help="(v2) base feature channels (default: 32).")
+    ap.add_argument(
+        "--blocks",
+        type=int,
+        nargs=3,
+        default=[2, 2, 2],
+        help="(v2) number of residual blocks per stage, e.g. 2 2 2 (default).",
+    )
+    ap.add_argument(
+        "--norm",
+        type=str,
+        default="instance",
+        choices=["instance", "group"],
+        help="(v2) normalization type (default: instance).",
+    )
+    ap.add_argument("--no-se", action="store_true", default=False, help="(v2) disable SE attention.")
+    ap.add_argument("--dropout", type=float, default=0.10, help="(v2) dropout probability (default: 0.10).")
     args = ap.parse_args()
+
+    # Auto-resolve paths from environment variables
+    totalspineseg_data = Path(os.environ.get("TOTALSPINESEG_DATA", ""))
+    if args.patches_dir is None:
+        if not totalspineseg_data:
+            raise SystemExit(
+                "Missing --patches-dir. Provide it explicitly or set $TOTALSPINESEG_DATA environment variable."
+            )
+        d105_candidates = sorted((totalspineseg_data / "nnUNet" / "raw").glob("Dataset105_*"))
+        if not d105_candidates:
+            raise SystemExit(
+                f"未找到 Dataset105_* 目录在 {totalspineseg_data/'nnUNet'/'raw'}。\n"
+                "请先运行: python scripts/prepare_dataset_105.py"
+            )
+        args.patches_dir = d105_candidates[0] / "ldh_twostage" / "stageA_patches"
+    
+    if args.out is None:
+        if not totalspineseg_data:
+            raise SystemExit(
+                "Missing --out. Provide it explicitly or set $TOTALSPINESEG_DATA environment variable."
+            )
+        d105_candidates = sorted((totalspineseg_data / "nnUNet" / "results").glob("Dataset105_*"))
+        if not d105_candidates:
+            d105_candidates = sorted((totalspineseg_data / "nnUNet" / "raw").glob("Dataset105_*"))
+        if not d105_candidates:
+            raise SystemExit(
+                f"未找到 Dataset105_* 目录。\n"
+                "请先运行: python scripts/prepare_dataset_105.py"
+            )
+        ckpt_dir = totalspineseg_data / "nnUNet" / "results" / d105_candidates[0].name / "ldh_twostage" / "checkpoints"
+        args.out = ckpt_dir / f"ldh_stageA_fold_{args.fold}.pth"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Stage A init: patches_dir={args.patches_dir}")
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Stage A loading train split...")
@@ -181,7 +249,25 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **dl_kwargs)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, **dl_kwargs)
 
-    model = StageADetector(in_channels=3).to(device)
+    model = StageADetectorV2(
+        in_channels=3,
+        base=int(args.base),
+        blocks=(int(args.blocks[0]), int(args.blocks[1]), int(args.blocks[2])),
+        norm=str(args.norm),
+        use_se=not bool(args.no_se),
+        dropout=float(args.dropout),
+    ).to(device)
+    model_meta = {
+        "arch": "v2",
+        "model_kwargs": {
+            "in_channels": 3,
+            "base": int(args.base),
+            "blocks": (int(args.blocks[0]), int(args.blocks[1]), int(args.blocks[2])),
+            "norm": str(args.norm),
+            "use_se": not bool(args.no_se),
+            "dropout": float(args.dropout),
+        },
+    }
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # Metrics tracking for plotting
@@ -247,7 +333,15 @@ def main():
         if is_best:
             best_recall = rep.recall
             args.out.parent.mkdir(parents=True, exist_ok=True)
-            torch.save({"model": model.state_dict(), "epoch": epoch, "val_recall": best_recall}, args.out)
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "epoch": epoch,
+                    "val_recall": best_recall,
+                    **model_meta,
+                },
+                args.out,
+            )
 
         # Update plot every epoch (overwrite)
         plot_path = _save_training_curves(history, args.out)

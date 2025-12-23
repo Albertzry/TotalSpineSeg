@@ -30,13 +30,40 @@ from tqdm import tqdm
 
 from totalspineseg.ldh_twostage.losses import focal_loss_with_logits
 from totalspineseg.ldh_twostage.metrics import DetectionReport, average_surface_distance, dice
-from totalspineseg.ldh_twostage.models import StageADetector
+from totalspineseg.ldh_twostage.models import StageADetectorV2
 from totalspineseg.utils.predict_nnunet import predict_nnunet
 
 
 def load_npz(path: Path):
     with np.load(str(path), allow_pickle=False) as z:
         return {k: z[k] for k in z.files}
+
+
+def _load_stagea_detector(ckpt_path: Path, device: "torch.device") -> torch.nn.Module:
+    """
+    Load Stage A detector checkpoint with backward compatibility.
+    Supports:
+      - legacy ckpt: {"model": state_dict, ...}
+      - new ckpt: {"model": state_dict, "arch": "v1|v2", "model_kwargs": {...}}
+    """
+    ckpt = torch.load(str(ckpt_path), map_location="cpu")
+    state = ckpt.get("model", ckpt)
+    arch = str(ckpt.get("arch", "v1")).lower()
+    kwargs = ckpt.get("model_kwargs", None)
+
+    if arch not in {"v2"}:
+        raise SystemExit(
+            f"StageA checkpoint arch={arch!r} 已不再支持（旧 StageADetector 已从代码中移除）。\n"
+            "请用新的 scripts/train_ldh_stage_a.py 重新训练 StageA（arch=v2），或换用带 arch=v2 的 checkpoint。"
+        )
+
+    if isinstance(kwargs, dict):
+        det = StageADetectorV2(**kwargs).to(device)
+    else:
+        det = StageADetectorV2(in_channels=3).to(device)
+    det.load_state_dict(state, strict=True)
+    det.eval()
+    return det
 
 
 def _default_data_root() -> Path | None:
@@ -239,9 +266,7 @@ def main():
         print(f"  split cases:        {len(split_ids)}")
 
     # ---------------- Stage A (disc-level) ----------------
-    det = StageADetector(in_channels=3).to(device)
-    det.load_state_dict(torch.load(args.ckpt_stagea, map_location="cpu")["model"])
-    det.eval()
+    det = _load_stagea_detector(args.ckpt_stagea, device)
 
     # aggregate per disc: key=(sample_id, disc_label)
     probs_by_disc = defaultdict(list)

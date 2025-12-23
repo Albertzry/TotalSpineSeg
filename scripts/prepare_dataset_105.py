@@ -1171,8 +1171,8 @@ def main():
                         help='Device for nnUNet inference (cuda/cpu)')
     parser.add_argument('--stagea-patch', type=int, default=96,
                         help='StageA patch size (cube), default 96')
-    parser.add_argument('--stageb-roi', type=int, default=48,
-                        help='StageB ROI size (cube), default 48')
+    parser.add_argument('--stageb-roi', type=int, default=64,
+                        help='StageB ROI size (cube), default 64')
     parser.add_argument('--stageb-neg-per-disc', type=int, default=1,
                         help='Scheme D: number of negative StageB ROIs per negative disc (default: 1)')
     parser.add_argument('--stageb-hardneg-per-posdisc', type=int, default=1,

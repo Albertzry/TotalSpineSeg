@@ -221,15 +221,12 @@ python scripts/train_ldh_stage_b.py \
 ### 修改网络结构
 编辑 `totalspineseg/ldh_twostage/models.py`：
 ```python
-# Stage A 检测器（5层卷积 + 全连接）
-class StageADetector(nn.Module):
-    def __init__(self, in_channels=3, base_channels=16):  # 可调整 base_channels
+# Stage A 检测器（v2：残差3D CNN + 可选SE注意力 + Dropout）
+class StageADetectorV2(nn.Module):
+    def __init__(self, in_channels=3, base=32, blocks=(2,2,2), norm="instance", use_se=True, dropout=0.1):
         ...
 
-# Stage B U-Net（4层，16→128通道）
-class SmallUNet3D(nn.Module):
-    def __init__(self, in_channels=3, out_channels=1, init_features=16):  # 可调整 init_features
-        ...
+# Stage B（已切到 nnUNetv2 训练/推理；SmallUNet3D 属于旧方案）
 ```
 
 ### 自定义采样策略
