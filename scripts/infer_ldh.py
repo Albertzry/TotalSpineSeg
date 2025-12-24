@@ -466,7 +466,7 @@ def main() -> None:
     from totalspineseg.init_inference import init_inference
     from totalspineseg.inference import inference as tss_inference
     from totalspineseg.ldh_twostage.disc_index import DiscIndexSpec, make_disc_index_map_from_step2_full_labels
-    from totalspineseg.ldh_twostage.models import StageADetector
+    from totalspineseg.ldh_twostage.models import StageADetectorV2
     from totalspineseg.utils.predict_nnunet import predict_nnunet
     from totalspineseg.utils.transform_seg2image import transform_seg2image_mp
     from totalspineseg.utils.utils import ZIP_URLS
@@ -571,8 +571,10 @@ def main() -> None:
     preview_ldh_dir.mkdir(parents=True, exist_ok=True)
 
     # Load Stage A model
-    det = StageADetector(in_channels=3).to(device)
-    det.load_state_dict(torch.load(ckpt_stagea, map_location="cpu")["model"])
+    det = StageADetectorV2(in_channels=3).to(device)
+    ckpt = torch.load(ckpt_stagea, map_location="cpu")
+    state = ckpt.get("model", ckpt)
+    det.load_state_dict(state, strict=True)
     det.eval()
     
     # Stage B uses nnUNet, will be initialized during inference
