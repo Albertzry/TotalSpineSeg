@@ -27,7 +27,6 @@ import tempfile
 import multiprocessing as mp
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 from tqdm import tqdm
@@ -413,7 +412,7 @@ def main() -> None:
         default=None,
         help="cuda/cpu（默认自动：优先 $TOTALSPINESEG_DEVICE；否则有 GPU 用 cuda，否则 cpu）。",
     )
-    ap.add_argument("--out-name", type=str, default=None, help="输出目录名（默认自动带时间戳）。")
+    ap.add_argument("--out-name", type=str, default=None, help="输出目录名（默认：infer_output）。")
     ap.add_argument("--overwrite", action="store_true", default=False, help="允许覆盖已存在输出目录。")
     ap.add_argument("--no-init", action="store_true", help="不自动下载 nnUNet 权重。")
     ap.add_argument("--max-workers", type=int, default=os.cpu_count() or 8)
@@ -472,8 +471,7 @@ def main() -> None:
     from totalspineseg.utils.utils import ZIP_URLS
 
     # output directory under input_dir
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_name = args.out_name or f"infer_ldh_output_{ts}"
+    out_name = args.out_name or "infer_output"
     out_dir = (input_dir / out_name).resolve()
     if out_dir.exists() and not args.overwrite:
         raise SystemExit(f"输出目录已存在：{out_dir}（如需覆盖请加 --overwrite）")
