@@ -19,6 +19,12 @@ def main():
         '''),
         epilog=textwrap.dedent('''
             Examples:
+            # 方式1: 使用显式参数（推荐）
+            totalspineseg --input-dir input_folder --output-dir output_folder
+            totalspineseg --input-dir input.nii.gz --output-dir output_folder
+            totalspineseg --input-dir input_folder --output-dir output_folder --loc output_folder_loc/step2_output
+            
+            # 方式2: 使用位置参数（向后兼容）
             totalspineseg input.nii.gz output_folder
             totalspineseg input.nii.gz output_folder --loc output_folder_loc/step2_output/localizer.nii.gz
             totalspineseg input.nii output_folder
@@ -32,12 +38,20 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
-        'input', type=Path,
-        help='The input folder containing the .nii.gz (or .nii) images to run the model on, or a single .nii.gz (or .nii) image.'
+        'input', type=Path, nargs='?', default=None,
+        help='The input folder containing the .nii.gz (or .nii) images to run the model on, or a single .nii.gz (or .nii) image. 如果提供了--input-dir，此参数将被忽略。'
     )
     parser.add_argument(
-        'output', type=Path,
-        help='The output folder where the model outputs will be stored.'
+        'output', type=Path, nargs='?', default=None,
+        help='The output folder where the model outputs will be stored. 如果提供了--output-dir，此参数将被忽略。'
+    )
+    parser.add_argument(
+        '--input-dir', type=Path, default=None,
+        help='输入文件夹路径（包含 .nii.gz 或 .nii 图像文件）或单个图像文件路径'
+    )
+    parser.add_argument(
+        '--output-dir', type=Path, default=None,
+        help='输出文件夹路径（用于保存模型输出结果）'
     )
     parser.add_argument(
         '--iso', action="store_true", default=False,
@@ -99,9 +113,23 @@ def main():
     # Parse the command-line arguments
     args = parser.parse_args()
 
+    # 确定输入路径：优先使用 --input-dir，否则使用位置参数 input
+    if args.input_dir is not None:
+        input_path = args.input_dir
+    elif args.input is not None:
+        input_path = args.input
+    else:
+        raise SystemExit("必须提供 --input-dir 或 input 参数")
+    
+    # 确定输出路径：优先使用 --output-dir，否则使用位置参数 output
+    if args.output_dir is not None:
+        output_path = args.output_dir
+    elif args.output is not None:
+        output_path = args.output
+    else:
+        raise SystemExit("必须提供 --output-dir 或 output 参数")
+    
     # Get the command-line argument values
-    input_path = args.input
-    output_path = args.output
     output_iso = args.iso
     loc_path = args.loc
     suffix = args.suffix

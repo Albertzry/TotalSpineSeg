@@ -5193,13 +5193,18 @@ def generate_clinical_report(mri_path: str, step2_path: str, ldh_path: str, outp
     return report
 
 
-def _find_matching_files(parent_dir: str) -> Dict[str, Dict[str, str]]:
+def _find_matching_files(input_dir: str) -> Dict[str, Dict[str, str]]:
     """
-    Find raw images in parent directory and step2_output, ldh_output files under infer_output.
+    Find raw images in input directory and step2_output, ldh_output files under infer_output.
     Returns: {case_id: {"mri": path, "step2": path, "ldh": path}}
+    
+    Parameters:
+    -----------
+    input_dir : str
+        Input directory path containing raw images and infer_output folder
     """
-    parent = Path(parent_dir)
-    infer_output = parent / "infer_output"
+    input_path = Path(input_dir)
+    infer_output = input_path / "infer_output"
     step2_dir = infer_output / "step2_output"
     ldh_dir = infer_output / "ldh_output"
     
@@ -5212,13 +5217,13 @@ def _find_matching_files(parent_dir: str) -> Dict[str, Dict[str, str]]:
     
     # Find raw images (.nii.gz files, exclude infer_output directory)
     raw_images = {}
-    for img_path in parent.glob("*.nii.gz"):
-        if img_path.parent == parent:  # ensure in parent directory root
+    for img_path in input_path.glob("*.nii.gz"):
+        if img_path.parent == input_path:  # ensure in input directory root
             case_id = img_path.stem.replace(".nii", "")  # remove .nii.gz suffix
             raw_images[case_id] = str(img_path)
     
     if not raw_images:
-        raise SystemExit(f"No raw .nii.gz images found in parent directory: {parent}")
+        raise SystemExit(f"No raw .nii.gz images found in input directory: {input_path}")
     
     # Match step2 and ldh files
     matches = {}
@@ -5249,9 +5254,25 @@ def _build_argparser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
+  # 方式1: 使用显式参数（推荐）
+  python calculate.py --input-dir /path/to/input --output-dir /path/to/output
+  
+  # 方式2: 使用parent_dir（向后兼容）
   python calculate.py /path/to/parent_dir
 
-Directory structure required:
+Directory structure (方式1 - 显式参数):
+  input_dir/
+    ├── case1.nii.gz          (raw MRI)
+    ├── case2.nii.gz
+    └── infer_output/
+        ├── step2_output/
+        │   ├── case1.nii.gz
+        │   └── case2.nii.gz
+        └── ldh_output/
+            ├── case1.nii.gz
+            └── case2.nii.gz
+
+Directory structure (方式2 - parent_dir):
   parent_dir/
     ├── case1.nii.gz          (raw MRI)
     ├── case2.nii.gz
@@ -5263,35 +5284,67 @@ Directory structure required:
             ├── case1.nii.gz
             └── case2.nii.gz
 
-Output will be saved to: parent_dir/clinical_report/
+Output will be saved to: output_dir/ (方式1) or parent_dir/clinical_report/ (方式2)
         """,
     )
     ap.add_argument(
         "parent_dir",
         type=str,
-        help="Parent directory path (contains raw images and infer_output folder)",
+        nargs="?",
+        default=None,
+        help="Parent directory path (contains raw images and infer_output folder). 如果提供了--input-dir，此参数将被忽略。",
+    )
+    ap.add_argument(
+        "--input-dir",
+        type=str,
+        default=None,
+        help="输入文件夹路径（包含原始MRI图像和infer_output文件夹）",
+    )
+    ap.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="输出文件夹路径（用于保存计算结果）",
     )
     ap.add_argument(
         "--out-dir-name",
         type=str,
         default="clinical_report",
-        help="Output directory name (default: clinical_report)",
+        help="输出目录名称（仅在未指定--output-dir时使用，默认: clinical_report）",
     )
     return ap
 
 
 def main() -> None:
     args = _build_argparser().parse_args()
-    parent_dir = Path(args.parent_dir).resolve()
     
-    if not parent_dir.is_dir():
-        raise SystemExit(f"Parent directory does not exist: {parent_dir}")
+    # 确定输入目录：优先使用 --input-dir，否则使用 parent_dir
+    if args.input_dir:
+        input_dir = Path(args.input_dir).resolve()
+    elif args.parent_dir:
+        input_dir = Path(args.parent_dir).resolve()
+    else:
+        raise SystemExit("必须提供 --input-dir 或 parent_dir 参数")
+    
+    if not input_dir.is_dir():
+        raise SystemExit(f"输入目录不存在: {input_dir}")
+    
+    # 确定输出目录：优先使用 --output-dir，否则基于 parent_dir 生成
+    if args.output_dir:
+        output_base = Path(args.output_dir).resolve()
+    elif args.parent_dir:
+        output_base = Path(args.parent_dir).resolve() / args.out_dir_name
+    else:
+        # 如果只提供了 --input-dir 而没有 --output-dir，在输入目录下创建输出目录
+        output_base = input_dir / args.out_dir_name
+    
+    # 确保输出目录的父目录存在
+    output_base.parent.mkdir(parents=True, exist_ok=True)
     
     # Find matching files
-    matches = _find_matching_files(str(parent_dir))
+    matches = _find_matching_files(str(input_dir))
     
     # Output directory - clean existing folder before creating new one
-    output_base = parent_dir / args.out_dir_name
     if output_base.exists():
         shutil.rmtree(output_base)
     _ensure_dir(str(output_base))
@@ -5320,7 +5373,7 @@ def main() -> None:
     
     # Save summary
     summary = {
-        "parent_dir": str(parent_dir),
+        "input_dir": str(input_dir),
         "output_base": str(output_base),
         "total_cases": len(matches),
         "results": results,
