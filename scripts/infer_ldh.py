@@ -391,11 +391,31 @@ def _default_model_folder_stageb(*, totalspineseg_data: Path) -> Path:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="LDH two-stage inference (Stage A detection + Stage B ROI segmentation)",
+        epilog="""
+使用示例：
+  # 方式1: 使用显式参数（推荐）
+  python scripts/infer_ldh.py --input-dir /path/to/input --output-dir /path/to/output --data-dir /path/to/TotalSpineSegData
+  
+  # 方式2: 使用位置参数（向后兼容）
+  python scripts/infer_ldh.py /path/to/input_dir
+  
+  # 方式3: 只指定输入，输出在输入目录下创建
+  python scripts/infer_ldh.py --input-dir /path/to/input --data-dir /path/to/TotalSpineSegData
+
+参数优先级：
+  - --input-dir 优先于位置参数 input_dir_pos
+  - --output-dir 优先于 --out-name（如果未指定 --output-dir，则在输入目录下创建名为 --out-name 的文件夹）
+  - --data-dir 优先于环境变量 TOTALSPINESEG_DATA
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     # 最简用法：python scripts/infer_ldh.py <input_dir>
-    ap.add_argument("input_dir_pos", type=Path, nargs="?", help="未知 MRI 输入文件夹（支持单个或多个病例）。")
-    ap.add_argument("--input-dir", type=Path, default=None, help="同 positional input_dir；如同时提供，以该值为准。")
-    ap.add_argument("--data-dir", type=Path, default=None, help="TotalSpineSeg data dir（默认读 $TOTALSPINESEG_DATA）。")
+    ap.add_argument("input_dir_pos", type=Path, nargs="?", help="未知 MRI 输入文件夹（支持单个或多个病例）。如果提供了--input-dir，此参数将被忽略。")
+    ap.add_argument("--input-dir", type=Path, default=None, help="输入文件夹路径（包含 .nii.gz 或 .nii 图像文件）。优先于位置参数。")
+    ap.add_argument("--output-dir", type=Path, default=None, help="输出文件夹路径（用于保存推理结果）。如果未指定，将在输入目录下创建名为 --out-name 的文件夹（默认：infer_output）。")
+    ap.add_argument("--data-dir", type=Path, default=None, help="TotalSpineSeg 数据目录路径（用于存储模型权重和 nnUNet 数据）。优先于环境变量 $TOTALSPINESEG_DATA。")
     ap.add_argument("--fold", type=int, default=0, help="使用哪一个 fold 的 checkpoint（默认 0）。")
     ap.add_argument("--ckpt-stagea", type=Path, default=None, help="Stage A checkpoint (.pth)，可覆盖默认路径。")
     ap.add_argument("--ckpt-stageb", type=Path, default=None, help="DEPRECATED: Stage B 现在使用 nnUNet (Dataset 107)。请使用 --model-folder-stageb。")
@@ -441,12 +461,27 @@ def main() -> None:
     ap.add_argument("--preview-alpha", type=float, default=0.55)
     args = ap.parse_args()
 
+    # 确定输入目录：优先使用 --input-dir，否则使用位置参数
     input_dir = args.input_dir if args.input_dir is not None else args.input_dir_pos
     if input_dir is None:
-        raise SystemExit("请提供输入目录：python scripts/infer_ldh.py /path/to/input_dir")
+        raise SystemExit("请提供输入目录：python scripts/infer_ldh.py --input-dir /path/to/input_dir 或 python scripts/infer_ldh.py /path/to/input_dir")
     input_dir = Path(input_dir).resolve()
     if not input_dir.is_dir():
         raise SystemExit(f"输入必须是文件夹：{input_dir}")
+
+    # 确定输出目录：优先使用 --output-dir，否则在输入目录下创建
+    if args.output_dir is not None:
+        out_dir = Path(args.output_dir).resolve()
+    else:
+        out_name = args.out_name or "infer_output"
+        out_dir = (input_dir / out_name).resolve()
+    
+    # 确保输出目录的父目录存在
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    
+    if out_dir.exists() and not args.overwrite:
+        raise SystemExit(f"输出目录已存在：{out_dir}（如需覆盖请加 --overwrite）")
+    _mkdir_clean(out_dir, overwrite=bool(args.overwrite))
 
     # Lazy imports for runtime dependencies (so --help works even if env missing deps)
     try:
@@ -470,24 +505,25 @@ def main() -> None:
     from totalspineseg.utils.transform_seg2image import transform_seg2image_mp
     from totalspineseg.utils.utils import ZIP_URLS
 
-    # output directory under input_dir
-    out_name = args.out_name or "infer_output"
-    out_dir = (input_dir / out_name).resolve()
-    if out_dir.exists() and not args.overwrite:
-        raise SystemExit(f"输出目录已存在：{out_dir}（如需覆盖请加 --overwrite）")
-    _mkdir_clean(out_dir, overwrite=bool(args.overwrite))
-
     # Keep a copy of originals (named as <case>_0000.nii.gz) for resampling back
     original_raw_dir = out_dir / "original_raw"
     _prepare_original_raw(input_dir, original_raw_dir, overwrite=bool(args.overwrite))
 
-    # TotalSpineSeg data dir
+    # TotalSpineSeg data dir：优先使用 --data-dir，否则使用环境变量，最后回退到默认路径
     if args.data_dir is not None:
         data_dir = Path(args.data_dir).resolve()
     elif "TOTALSPINESEG_DATA" in os.environ:
         data_dir = Path(os.environ["TOTALSPINESEG_DATA"]).resolve()
     else:
         data_dir = (Path(__file__).parent.parent / "data").resolve()
+    
+    if not data_dir.exists():
+        raise SystemExit(
+            f"TotalSpineSeg 数据目录不存在：{data_dir}\n"
+            "请使用以下方式之一指定数据目录：\n"
+            "  1. 使用 --data-dir 参数：--data-dir /path/to/TotalSpineSegData\n"
+            "  2. 设置环境变量：export TOTALSPINESEG_DATA=/path/to/TotalSpineSegData"
+        )
 
     # Resolve device default
     if args.device is None:

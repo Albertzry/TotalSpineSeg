@@ -34,7 +34,7 @@ keywords = [
 ]
 dependencies = [
     "tqdm",
-    "numpy<2",
+    "numpy>=2,<2.3",
     "nibabel",
     "gryds",
     "torchio",

@@ -1,7 +1,7 @@
 import argparse, textwrap, os
 from pathlib import Path
 import importlib.resources
-from totalspineseg import install_weights
+from totalspineseg.utils.install_weights import install_weights
 from totalspineseg.utils.utils import ZIP_URLS
 
 def main():
