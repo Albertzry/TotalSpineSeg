@@ -1100,7 +1100,6 @@ def calc_vertebral_height_anterior_corrected(
                     "p1": (float(anterior_line[1][0] - x0), float(anterior_line[1][1] - y0)),
                     "color": "cyan",
                     "lw": 3,
-                    "label": f"Ant: {anterior_height_mm:.1f}mm"
                 }))
                 
                 # Draw posterior line (yellow) - close to canal
@@ -1109,7 +1108,6 @@ def calc_vertebral_height_anterior_corrected(
                     "p1": (float(posterior_line[1][0] - x0), float(posterior_line[1][1] - y0)),
                     "color": "yellow",
                     "lw": 3,
-                    "label": f"Post: {posterior_height_mm:.1f}mm"
                 }))
                 
                 # Draw corner points
@@ -1122,8 +1120,6 @@ def calc_vertebral_height_anterior_corrected(
                     "s": 80
                 }))
             
-            text_info = f"Ant: {anterior_height_mm:.1f}mm, Post: {posterior_height_mm:.1f}mm"
-            overlays.append(("text", {"xy": (5, 15), "text": text_info, "color": "w", "fontsize": 12}))
             save_visualization(save_path, img_c, f"Vertebral Height {name}", overlays)
         else:
             # Fallback: save full image
@@ -1134,14 +1130,12 @@ def calc_vertebral_height_anterior_corrected(
                     "p1": (float(anterior_line[1][0]), float(anterior_line[1][1])),
                     "color": "cyan",
                     "lw": 3,
-                    "label": f"Ant: {anterior_height_mm:.1f}mm"
                 }),
                 ("line", {
                     "p0": (float(posterior_line[0][0]), float(posterior_line[0][1])),
                     "p1": (float(posterior_line[1][0]), float(posterior_line[1][1])),
                     "color": "yellow",
                     "lw": 3,
-                    "label": f"Post: {posterior_height_mm:.1f}mm"
                 }),
                 ("scatter", {
                     "pts": corners,
@@ -1149,8 +1143,6 @@ def calc_vertebral_height_anterior_corrected(
                     "s": 80
                 }),
             ]
-            text_info = f"Ant: {anterior_height_mm:.1f}mm, Post: {posterior_height_mm:.1f}mm"
-            overlays.append(("text", {"xy": (10, 15), "text": text_info, "color": "w", "fontsize": 12}))
             save_visualization(save_path, img_zy, f"Vertebral Height {name}", overlays)
     
     return {
@@ -1329,9 +1321,7 @@ def calc_disc_height_corrected(
                         "p1": (float(y_mid - x0), float(z_max - y0)),
                         "color": "yellow",
                         "lw": 2,
-                        "label": f"DH={dh_mm:.1f}mm (fallback)"
                     }))
-                overlays.append(("text", {"xy": (5, 15), "text": f"DH={dh_mm:.1f}mm (fallback)", "color": "w", "fontsize": 12}))
                 save_visualization(save_path, img_c, f"Disc Height (Fallback) {name}", overlays)
         
         return {"dh_mm": _safe_float(dh_mm), "hdr": None, "dhi": None, "units": {"dh": "mm"}, "status": "insufficient_points"}
@@ -1468,7 +1458,6 @@ def calc_disc_height_corrected(
                     p_top_crop = (float(pt_top[0] - x0), float(pt_top[1] - y0))
                     p_bot_crop = (float(pt_bottom[0] - x0), float(pt_bottom[1] - y0))
                     
-                    label = labels[i] if i < len(labels) else f"L{i+1}"
                     overlays.append(
                         (
                             "line",
@@ -1477,17 +1466,9 @@ def calc_disc_height_corrected(
                                 "p1": p_bot_crop,
                                 "color": "yellow",
                                 "lw": 2,
-                                "label": f"{label} {height_mm:.1f}mm",
                             },
                         )
                     )
-            
-            # Always add text overlays
-            overlays.append(("text", {"xy": (5, 15), "text": f"DH={dh_mm:.1f}mm", "color": "w", "fontsize": 12}))
-            if hdr is not None:
-                overlays.append(("text", {"xy": (5, 35), "text": f"HDR={hdr:.3f}", "color": "w", "fontsize": 12}))
-            if dhi is not None:
-                overlays.append(("text", {"xy": (5, 55), "text": f"DHI={dhi:.3f}", "color": "w", "fontsize": 12}))
 
         save_visualization(save_path, img_c, f"Disc Height (Linear Regression) {name}", overlays)
 
@@ -3657,11 +3638,6 @@ def draw_cobb_visualization(
     # Removed: dashed extension lines, angle arc, and intersection point
     # Only keep the two solid line segments
     
-    # Add angle text
-    if angle_deg is not None:
-        text_pos = (w * 0.05, h * 0.1)
-        overlays.append(("text", {"xy": text_pos, "text": f"{title}: {angle_deg:.1f}°", "color": "white", "fontsize": 14}))
-    
     save_visualization(save_path, slice_img, title, overlays)
 
 
@@ -4236,11 +4212,6 @@ def visualize_SS_S1(
             "lw": 1.5,
         }))
     
-    # Add angle text
-    if angle_deg is not None:
-        text_pos = (w * 0.05, h * 0.1)
-        overlays.append(("text", {"xy": text_pos, "text": f"{title}: {angle_deg:.1f}°", "color": "white", "fontsize": 14}))
-    
     save_visualization(save_path, slice_img, title, overlays)
 
 
@@ -4422,10 +4393,6 @@ def visualize_DIA(
             # Fallback for vertical line
             if 0 <= x0_lower < w:
                 overlays.append(("line", {"p0": (x0_lower, 0), "p1": (x0_lower, h - 1), "color": "magenta", "lw": 1, "linestyle": "-"}))
-    
-    # Add angle text
-    text_pos = (w * 0.05, h * 0.1)
-    overlays.append(("text", {"xy": text_pos, "text": f"DIA {name}: {angle_deg:.1f}°", "color": "white", "fontsize": 14}))
     
     save_visualization(save_path, slice_img, f"Disc Inclination Angle {name}", overlays)
 
@@ -4875,10 +4842,7 @@ def calc_ldh_parameters(
         overlays = [
             ("mask", {"mask": disc_c > 0, "color": "lime", "alpha": 0.55}),
             ("mask", {"mask": ldh_c > 0, "color": "r", "alpha": 0.55}),
-            ("text", {"xy": (5, 15), "text": f"{best_name}  PA={pa_mm2:.1f}mm²", "color": "w", "fontsize": 12}),
         ]
-        if pd_mm is not None:
-            overlays.append(("text", {"xy": (5, 35), "text": f"PD={pd_mm:.1f}mm  PLR={plr:.3f}" if plr is not None else f"PD={pd_mm:.1f}mm", "color": "w", "fontsize": 12}))
         if crop is not None and ldh_tip_xy is not None and nearest_xy is not None:
             crop_xy = _safe_unpack_crop(crop)
             if crop_xy is not None:
@@ -4894,7 +4858,6 @@ def calc_ldh_parameters(
                             "p1": (float(near_px[0] - x0), float(near_px[1] - y0)),
                             "color": "yellow",
                         "lw": 2,
-                        "label": f"{pd_mm:.1f}mm",
                     },
                 )
             )
