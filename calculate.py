@@ -15,6 +15,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -139,6 +140,99 @@ def resample_to_reference(
 
 def _ensure_dir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
+
+
+def _standardize_previews_from_raw_preview(output_dir: str) -> None:
+    """Move + rename legacy preview images from output_dir/raw/preview into output_dir/previews.
+
+    This enforces a strict flat directory convention:
+      - result/previews/vertebrae/
+      - result/previews/discs/
+      - result/previews/global/
+
+    Files are matched and renamed using the provided Type_Level_Metric rule.
+    After moving, empty directories under raw/preview are removed.
+    """
+
+    out = Path(output_dir)
+    src_root = out / "raw" / "preview"
+    if not src_root.exists() or not src_root.is_dir():
+        return
+
+    dst_previews = out / "previews"
+    dst_vertebrae = dst_previews / "vertebrae"
+    dst_discs = dst_previews / "discs"
+    dst_global = dst_previews / "global"
+    dst_vertebrae.mkdir(parents=True, exist_ok=True)
+    dst_discs.mkdir(parents=True, exist_ok=True)
+    dst_global.mkdir(parents=True, exist_ok=True)
+
+    global_map = {
+        "angle_LL.png": (dst_global, "global_cobb_ll.png"),
+        "angle_SS.png": (dst_global, "global_cobb_ss.png"),
+        "angle_LSA.png": (dst_global, "global_cobb_lsa.png"),
+        "ldh_PD_PA_PAR_PLR.png": (dst_global, "global_herniation_summary.png"),
+        "agl_discs.png": (dst_global, "global_intensity_agl.png"),
+    }
+
+    rx_vh = re.compile(r"^vh_?(?P<level>[A-Za-z0-9]+)\\.png$", re.IGNORECASE)
+    rx_vert_ap = re.compile(r"^vertebra_ap_(?P<level>[A-Za-z0-9]+)\\.png$", re.IGNORECASE)
+    rx_dia = re.compile(r"^dia_(?P<level>[A-Za-z0-9\-]+)\\.png$", re.IGNORECASE)
+    rx_disc_metrics = re.compile(r"^disc_metrics_(?P<level>[A-Za-z0-9\-]+)\\.png$", re.IGNORECASE)
+
+    for f in src_root.rglob("*.png"):
+        if not f.is_file():
+            continue
+
+        name = f.name
+        dst_dir: Optional[Path] = None
+        dst_name: Optional[str] = None
+
+        if name in global_map:
+            dst_dir, dst_name = global_map[name]
+        else:
+            m = rx_vh.match(name)
+            if m:
+                level = m.group("level").upper()
+                dst_dir, dst_name = (dst_vertebrae, f"vert_{level}_vh.png")
+            else:
+                m = rx_vert_ap.match(name)
+                if m:
+                    level = m.group("level").upper()
+                    dst_dir, dst_name = (dst_vertebrae, f"vert_{level}_ap.png")
+                else:
+                    m = rx_dia.match(name)
+                    if m:
+                        level = m.group("level").upper()
+                        dst_dir, dst_name = (dst_discs, f"disc_{level}_dia.png")
+                    else:
+                        m = rx_disc_metrics.match(name)
+                        if m:
+                            level = m.group("level").upper()
+                            dst_dir, dst_name = (dst_discs, f"disc_{level}_dm.png")
+
+        if dst_dir is None or dst_name is None:
+            continue
+
+        dst_path = dst_dir / dst_name
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        if dst_path.exists():
+            dst_path.unlink()
+        shutil.move(str(f), str(dst_path))
+
+    # Cleanup: remove empty directories under src_root (and parent raw if empty)
+    for root, dirs, files in os.walk(str(src_root), topdown=False):
+        if not dirs and not files:
+            try:
+                os.rmdir(root)
+            except OSError:
+                pass
+    raw_dir = out / "raw"
+    if raw_dir.exists() and raw_dir.is_dir():
+        try:
+            raw_dir.rmdir()
+        except OSError:
+            pass
 
 
 def _safe_float(x: Any) -> Optional[float]:
@@ -4578,7 +4672,7 @@ def calc_cobb_angles(
                 l5_mask=mask_L5,
                 angle_deg=LL,
                 title="Lumbar Lordosis (LL)",
-                save_path=os.path.join(save_dir, "angle_LL.png"),
+                save_path=os.path.join(save_dir, "global_cobb_ll.png"),
                 mask_l1_disc=mask_T12L1_disc,  # T12-L1 disc for L1 superior endplate
                 mask_l5_disc=mask_L5S1_disc,
                 mask_spinal_canal=mask_spinal_canal,
@@ -4592,7 +4686,7 @@ def calc_cobb_angles(
                 l5_mask=mask_L5, # Pass L5 mask
                 angle_deg=SS,
                 title="Sacral Slope (SS)",
-                save_path=os.path.join(save_dir, "angle_SS.png"),
+                save_path=os.path.join(save_dir, "global_cobb_ss.png"),
                 mask_l5s1_disc=mask_L5S1_disc,
                 mask_spinal_canal=mask_spinal_canal,
             )
@@ -4605,7 +4699,7 @@ def calc_cobb_angles(
                 s1_mask=mask_S1,
                 angle_deg=LSA,
                 title="Lumbosacral Angle (LSA)",
-                save_path=os.path.join(save_dir, "angle_LSA.png"),
+                save_path=os.path.join(save_dir, "global_cobb_lsa.png"),
                 mask_l5s1_disc=mask_L5S1_disc,
                 mask_spinal_canal=mask_spinal_canal,
             )
@@ -4862,7 +4956,12 @@ def calc_ldh_parameters(
                 )
             )
             overlays.append(("scatter", {"pts": np.array([[ldh_tip_px[0] - x0, ldh_tip_px[1] - y0]], dtype=np.float32), "color": "yellow", "s": 25}))
-        save_visualization(os.path.join(save_dir, "ldh_PD_PA_PAR_PLR.png"), img_c, "LDH Measurements (Axial max area)", overlays)
+        save_visualization(
+            os.path.join(save_dir, "global_herniation_summary.png"),
+            img_c,
+            "LDH Measurements (Axial max area)",
+            overlays,
+        )
 
     return out
 
@@ -4900,7 +4999,7 @@ def calc_average_gray_level_in_discs(
         ax.set_ylabel("AGL (normalized 0-1)")
         ax.set_title("Average Gray Level in Discs")
         fig.tight_layout()
-        fig.savefig(os.path.join(save_dir, "agl_discs.png"), bbox_inches="tight", pad_inches=0.05)
+        fig.savefig(os.path.join(save_dir, "global_intensity_agl.png"), bbox_inches="tight", pad_inches=0.05)
         plt.close(fig)
 
     return {"status": "ok", "by_disc": out_by, "method": "percentile(1,99) -> [0,1] then mean within disc mask"}
@@ -4916,25 +5015,13 @@ def generate_clinical_report(mri_path: str, step2_path: str, ldh_path: str, outp
     Main entry: Load data, calculate all parameters, output JSON + preview PNG.
     """
     _ensure_dir(output_dir)
-    preview_dir = os.path.join(output_dir, "preview")
-    _ensure_dir(preview_dir)
-    
-    # Create categorized preview subdirectories
-    preview_geometry_vh = os.path.join(preview_dir, "geometry", "vertebral_height")
-    preview_geometry_ap = os.path.join(preview_dir, "geometry", "vertebral_ap_diameter")
-    preview_geometry_disc = os.path.join(preview_dir, "geometry", "disc_metrics")
-    preview_angles_dia = os.path.join(preview_dir, "angles", "disc_inclination")
-    preview_angles_cobb = os.path.join(preview_dir, "angles", "cobb")
-    preview_herniation = os.path.join(preview_dir, "herniation")
-    preview_intensity = os.path.join(preview_dir, "intensity")
-    
-    _ensure_dir(preview_geometry_vh)
-    _ensure_dir(preview_geometry_ap)
-    _ensure_dir(preview_geometry_disc)
-    _ensure_dir(preview_angles_dia)
-    _ensure_dir(preview_angles_cobb)
-    _ensure_dir(preview_herniation)
-    _ensure_dir(preview_intensity)
+    preview_dir = os.path.join(output_dir, "previews")
+    preview_vertebrae = os.path.join(preview_dir, "vertebrae")
+    preview_discs = os.path.join(preview_dir, "discs")
+    preview_global = os.path.join(preview_dir, "global")
+    _ensure_dir(preview_vertebrae)
+    _ensure_dir(preview_discs)
+    _ensure_dir(preview_global)
 
     mri = load_nifti(mri_path)
     step2 = load_nifti(step2_path)
@@ -5017,7 +5104,7 @@ def generate_clinical_report(mri_path: str, step2_path: str, ldh_path: str, outp
             vertebra_label=int(vid),
             canal_label=canal_label,
             mid_sag_x=mid_sag_x,
-            save_path=os.path.join(preview_geometry_vh, f"vh_{vn}.png"),
+            save_path=os.path.join(preview_vertebrae, f"vert_{vn}_vh.png"),
             name=vn,
         )
         report["geometry"]["vertebral_height"][vn] = vh
@@ -5032,7 +5119,7 @@ def generate_clinical_report(mri_path: str, step2_path: str, ldh_path: str, outp
             step2_zyx=step2.arr_zyx.astype(np.int32),
             spacing_xyz=mri.spacing_xyz,
             vertebra_label=int(vid),
-            save_path=os.path.join(preview_geometry_ap, f"vertebra_ap_{vn}.png"),
+            save_path=os.path.join(preview_vertebrae, f"vert_{vn}_ap.png"),
             name=vn,
         )
         report["geometry"]["vertebral_ap_diameter"][vn] = apd
@@ -5086,7 +5173,7 @@ def generate_clinical_report(mri_path: str, step2_path: str, ldh_path: str, outp
             canal_label=canal_label,
             upper_vh_avg_mm=_safe_float(up_vh),
             lower_vh_avg_mm=_safe_float(low_vh),
-            save_path=os.path.join(preview_geometry_disc, f"disc_metrics_{dn}.png"),
+            save_path=os.path.join(preview_discs, f"disc_{dn}_dm.png"),
             name=dn,
         )
         report["geometry"]["disc_metrics"][dn] = disc_metrics
@@ -5105,7 +5192,7 @@ def generate_clinical_report(mri_path: str, step2_path: str, ldh_path: str, outp
             spacing_xyz=mri.spacing_xyz,
             disc_label=int(did),
             mid_sag_x=mid_sag_x,
-            save_path=os.path.join(preview_angles_dia, f"dia_{dn}.png"),
+            save_path=os.path.join(preview_discs, f"disc_{dn}_dia.png"),
             name=dn,
             upper_vertebra_label=up_label,
             lower_vertebra_label=low_label,
@@ -5124,7 +5211,7 @@ def generate_clinical_report(mri_path: str, step2_path: str, ldh_path: str, outp
                 label_L1=int(vertebrae["L1"]),
                 label_L5=int(vertebrae["L5"]),
                 label_S1=int(vertebrae["S"]),  # S = Sacrum (label 50)
-                save_dir=preview_angles_cobb,
+                save_dir=preview_global,
             )
         )
     else:
@@ -5137,7 +5224,7 @@ def generate_clinical_report(mri_path: str, step2_path: str, ldh_path: str, outp
         ldh_zyx=(ldh.arr_zyx > 0).astype(np.uint8),
         spacing_xyz=mri.spacing_xyz,
         disc_labels=discs,
-        save_dir=preview_herniation,
+        save_dir=preview_global,
     )
 
     # -------- Intensity: AGL --------
@@ -5145,13 +5232,84 @@ def generate_clinical_report(mri_path: str, step2_path: str, ldh_path: str, outp
         mri_zyx=mri.arr_zyx,
         step2_zyx=step2.arr_zyx.astype(np.int32),
         disc_labels=discs,
-        save_dir=preview_intensity,
+        save_dir=preview_global,
     )
 
+    def _pivot_entity_based(old_report: Dict[str, Any]) -> Dict[str, Any]:
+        vertebrae_out: Dict[str, Dict[str, Any]] = {}
+        discs_out: Dict[str, Dict[str, Any]] = {}
+
+        vh_by_v = old_report.get("geometry", {}).get("vertebral_height", {})
+        ap_by_v = old_report.get("geometry", {}).get("vertebral_ap_diameter", {})
+        for level, vh in (vh_by_v or {}).items():
+            if not isinstance(vh, dict) or vh.get("status") != "ok":
+                continue
+            vertebrae_out.setdefault(str(level), {"level": str(level)})["vh"] = vh
+        for level, ap in (ap_by_v or {}).items():
+            if not isinstance(ap, dict) or ap.get("status") != "ok":
+                continue
+            vertebrae_out.setdefault(str(level), {"level": str(level)})["ap"] = ap
+
+        disc_metrics_by_d = old_report.get("geometry", {}).get("disc_metrics", {})
+        for level, dm in (disc_metrics_by_d or {}).items():
+            if not isinstance(dm, dict) or dm.get("status") != "ok":
+                continue
+            discs_out.setdefault(str(level), {"level": str(level)})["dm"] = dm
+
+        dia_by_d = (
+            old_report.get("angles", {})
+            .get("disc_inclination_angle_DIA", {})
+        )
+        for level, dia in (dia_by_d or {}).items():
+            if not isinstance(dia, dict) or dia.get("status") != "ok":
+                continue
+            discs_out.setdefault(str(level), {"level": str(level)})["dia"] = dia
+
+        ldh_by_disc = old_report.get("herniation", {}).get("by_disc", {})
+        for level, ldh_item in (ldh_by_disc or {}).items():
+            if not isinstance(ldh_item, dict) or ldh_item.get("status") != "ok":
+                continue
+            discs_out.setdefault(str(level), {"level": str(level)})["ldh"] = ldh_item
+
+        entity_report: Dict[str, Any] = {
+            "inputs": old_report.get("inputs", {}),
+            "spacing_mm": old_report.get("spacing_mm", {}),
+            "selected_slices": old_report.get("selected_slices", {}),
+            "previews": {
+                "vertebrae_dir": "previews/vertebrae",
+                "discs_dir": "previews/discs",
+                "global_dir": "previews/global",
+            },
+            "vertebrae": sorted(vertebrae_out.values(), key=lambda x: x.get("level", "")),
+            "discs": sorted(discs_out.values(), key=lambda x: x.get("level", "")),
+            "notes": old_report.get("notes", []),
+        }
+
+        for v in entity_report["vertebrae"]:
+            level = v.get("level")
+            if isinstance(level, str):
+                v["previews"] = {
+                    "vh": f"previews/vertebrae/vert_{level}_vh.png",
+                    "ap": f"previews/vertebrae/vert_{level}_ap.png",
+                }
+        for d in entity_report["discs"]:
+            level = d.get("level")
+            if isinstance(level, str):
+                d["previews"] = {
+                    "dm": f"previews/discs/disc_{level}_dm.png",
+                    "dia": f"previews/discs/disc_{level}_dia.png",
+                }
+        return entity_report
+
+    report = _pivot_entity_based(report)
+
     # Save JSON
-    json_path = os.path.join(output_dir, "clinical_report.json")
+    json_path = os.path.join(output_dir, "report.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
+
+    # Legacy compatibility: if any producer wrote into raw/preview, flatten & rename into previews/*
+    _standardize_previews_from_raw_preview(output_dir)
 
     return report
 
@@ -5272,8 +5430,8 @@ Output will be saved to: output_dir/ (方式1) or parent_dir/clinical_report/ (�
     ap.add_argument(
         "--out-dir-name",
         type=str,
-        default="clinical_report",
-        help="输出目录名称（仅在未指定--output-dir时使用，默认: clinical_report）",
+        default="result",
+        help="输出目录名称（仅在未指定--output-dir时使用，默认: result）",
     )
     return ap
 
@@ -5311,39 +5469,25 @@ def main() -> None:
     if output_base.exists():
         shutil.rmtree(output_base)
     _ensure_dir(str(output_base))
-    
+
+    multi_case = len(matches) > 1
+
     # Process each case with progress bar
-    results = {}
     for case_id, paths in tqdm(matches.items(), desc="Processing cases", total=len(matches)):
-        case_output = output_base / case_id
-        _ensure_dir(str(case_output))
-        
         try:
+            # Multi-case safety: write each case into its own subfolder to avoid
+            # collisions while preserving the standardized previews/* convention.
+            report_dir = (output_base / case_id) if multi_case else output_base
+            _ensure_dir(str(report_dir))
             report = generate_clinical_report(
                 mri_path=paths["mri"],
                 step2_path=paths["step2"],
                 ldh_path=paths["ldh"],
-                output_dir=str(case_output),
+                output_dir=str(report_dir),
             )
-            results[case_id] = {"status": "success", "output_dir": str(case_output)}
         except Exception as e:
-            import traceback
-            error_msg = str(e)
-            tb_str = traceback.format_exc()
             # Only print errors, not warnings
-            print(f"Error: Failed to process case {case_id}: {error_msg}")
-            results[case_id] = {"status": "failed", "error": error_msg}
-    
-    # Save summary
-    summary = {
-        "input_dir": str(input_dir),
-        "output_base": str(output_base),
-        "total_cases": len(matches),
-        "results": results,
-    }
-    summary_path = output_base / "summary.json"
-    with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
+            print(f"Error: Failed to process case {case_id}: {e}")
 
 
 if __name__ == "__main__":
