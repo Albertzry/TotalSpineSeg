@@ -4882,29 +4882,109 @@ def calc_ldh_parameters(
         ys = np.where(disc_slice > 0)[0]
         disc_ap_mm = float((int(ys.max()) - int(ys.min())) * sy) if ys.size > 0 else None
 
-    # PD: maximum distance from LDH points to nearest disc boundary point
+    # PD: Find the longest vertical line in LDH by scanning horizontally (X direction)
+    # Then calculate distance from this line to disc boundary
     pd_mm = None
-    ldh_pts_yx = np.stack(np.where(ldh_slice > 0), axis=1)  # (N,2) => (y,x)
+    longest_line_x = None
+    longest_line_y_min = None
+    longest_line_y_max = None
+    longest_line_length = 0
+    
     contour = get_mask_contour(disc_slice)
-    if ldh_pts_yx.shape[0] > 0 and contour.shape[0] > 0:
-        # contour is (x,y); convert to physical (x*sx, y*sy)
-        boundary_xy_mm = np.stack([contour[:, 0] * sx, contour[:, 1] * sy], axis=1)
-        tree = cKDTree(boundary_xy_mm)
-        # convert ldh points to physical
-        ldh_xy_mm = np.stack([ldh_pts_yx[:, 1].astype(np.float32) * sx, ldh_pts_yx[:, 0].astype(np.float32) * sy], axis=1)
-        dists, idxs = tree.query(ldh_xy_mm, k=1)
-        if dists.size > 0:
-            imax = int(np.argmax(dists))
-            pd_mm = float(dists[imax])
-            # record point pair for visualization
-            ldh_tip_xy = ldh_xy_mm[imax]
-            nearest_xy = boundary_xy_mm[int(idxs[imax])]
+    if ldh_slice.sum() > 0 and contour.shape[0] > 0:
+        # Scan horizontally (X direction) to find longest vertical line (Y direction)
+        for x in range(ldh_slice.shape[1]):
+            # Get all y coordinates where LDH exists at this x position
+            y_coords = np.where(ldh_slice[:, x] > 0)[0]
+            if y_coords.size == 0:
+                continue
+            
+            # Find continuous segments in y direction
+            # Sort y coordinates and find gaps
+            y_sorted = np.sort(y_coords)
+            if y_sorted.size == 1:
+                segment_length = 1
+                y_min = y_max = y_sorted[0]
+            else:
+                # Find the longest continuous segment
+                gaps = np.diff(y_sorted) > 1
+                if np.any(gaps):
+                    # Multiple segments, find the longest one
+                    gap_indices = np.where(gaps)[0]
+                    segment_starts = np.concatenate([[0], gap_indices + 1])
+                    segment_ends = np.concatenate([gap_indices + 1, [y_sorted.size]])
+                    segment_lengths = segment_ends - segment_starts
+                    longest_seg_idx = np.argmax(segment_lengths)
+                    y_min = y_sorted[segment_starts[longest_seg_idx]]
+                    y_max = y_sorted[segment_ends[longest_seg_idx] - 1]
+                    segment_length = segment_lengths[longest_seg_idx]
+                else:
+                    # Single continuous segment
+                    y_min = y_sorted[0]
+                    y_max = y_sorted[-1]
+                    segment_length = y_max - y_min + 1
+            
+            # Update if this is the longest line found so far
+            if segment_length > longest_line_length:
+                longest_line_length = segment_length
+                longest_line_x = x
+                longest_line_y_min = y_min
+                longest_line_y_max = y_max
+        
+        # Calculate distance from the longest vertical line to disc boundary
+        if longest_line_x is not None and longest_line_y_min is not None and longest_line_y_max is not None:
+            # contour is (x,y); convert to physical (x*sx, y*sy)
+            boundary_xy_mm = np.stack([contour[:, 0] * sx, contour[:, 1] * sy], axis=1)
+            tree = cKDTree(boundary_xy_mm)
+            
+            # Sample points along the vertical line (use midpoint and endpoints)
+            y_mid = (longest_line_y_min + longest_line_y_max) / 2.0
+            line_points_yx = [
+                (longest_line_y_min, longest_line_x),  # top point
+                (y_mid, longest_line_x),  # midpoint
+                (longest_line_y_max, longest_line_x),  # bottom point
+            ]
+            
+            # Convert to physical coordinates and find maximum distance
+            max_dist = 0.0
+            farthest_point_xy = None
+            nearest_boundary_xy = None
+            
+            for y, x in line_points_yx:
+                point_xy_mm = np.array([float(x) * sx, float(y) * sy], dtype=np.float32)
+                dist, idx = tree.query(point_xy_mm, k=1)
+                if dist > max_dist:
+                    max_dist = float(dist)
+                    farthest_point_xy = point_xy_mm
+                    nearest_boundary_xy = boundary_xy_mm[int(idx)]
+            
+            if max_dist > 0:
+                pd_mm = max_dist
+                # For visualization: store the vertical line endpoints
+                ldh_tip_xy = None  # Not used for line visualization
+                nearest_xy = nearest_boundary_xy
+                # Store line coordinates for visualization
+                line_x_px = longest_line_x
+                line_y_min_px = longest_line_y_min
+                line_y_max_px = longest_line_y_max
+            else:
+                ldh_tip_xy = None
+                nearest_xy = None
+                line_x_px = None
+                line_y_min_px = None
+                line_y_max_px = None
         else:
             ldh_tip_xy = None
             nearest_xy = None
+            line_x_px = None
+            line_y_min_px = None
+            line_y_max_px = None
     else:
         ldh_tip_xy = None
         nearest_xy = None
+        line_x_px = None
+        line_y_min_px = None
+        line_y_max_px = None
 
     plr = None
     if pd_mm is not None and disc_ap_mm is not None and disc_ap_mm > 1e-6:
@@ -4937,25 +5017,27 @@ def calc_ldh_parameters(
             ("mask", {"mask": disc_c > 0, "color": "lime", "alpha": 0.55}),
             ("mask", {"mask": ldh_c > 0, "color": "r", "alpha": 0.55}),
         ]
-        if crop is not None and ldh_tip_xy is not None and nearest_xy is not None:
+        # Draw the longest vertical line in LDH
+        if crop is not None and line_x_px is not None and line_y_min_px is not None and line_y_max_px is not None:
             crop_xy = _safe_unpack_crop(crop)
             if crop_xy is not None:
                 x0, y0 = crop_xy
-                # physical coordinates -> pixels
-                ldh_tip_px = (ldh_tip_xy[0] / sx, ldh_tip_xy[1] / sy)  # (x,y)
-                near_px = (nearest_xy[0] / sx, nearest_xy[1] / sy)
+                # Convert to cropped coordinates
+                line_x_cropped = float(line_x_px - x0)
+                line_y_min_cropped = float(line_y_min_px - y0)
+                line_y_max_cropped = float(line_y_max_px - y0)
+                # Draw vertical line
                 overlays.append(
                     (
                         "line",
                         {
-                            "p0": (float(ldh_tip_px[0] - x0), float(ldh_tip_px[1] - y0)),
-                            "p1": (float(near_px[0] - x0), float(near_px[1] - y0)),
+                            "p0": (line_x_cropped, line_y_min_cropped),
+                            "p1": (line_x_cropped, line_y_max_cropped),
                             "color": "yellow",
-                        "lw": 2,
-                    },
+                            "lw": 2,
+                        },
+                    )
                 )
-            )
-            overlays.append(("scatter", {"pts": np.array([[ldh_tip_px[0] - x0, ldh_tip_px[1] - y0]], dtype=np.float32), "color": "yellow", "s": 25}))
         save_visualization(
             os.path.join(save_dir, "global_herniation_summary.png"),
             img_c,
