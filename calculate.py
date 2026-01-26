@@ -5202,20 +5202,56 @@ def generate_clinical_report(mri_path: str, step2_path: str, ldh_path: str, outp
 
     # -------- Angles: LL/SS/LSA --------
     if all(k in vertebrae for k in ("L1", "L5", "S")):  # S = Sacrum
-        report["angles"].update(
-            calc_cobb_angles(
-                mri_zyx=mri.arr_zyx,
-                step2_zyx=step2.arr_zyx.astype(np.int32),
-                spacing_xyz=mri.spacing_xyz,
-                mid_sag_x=mid_sag_x,
-                label_L1=int(vertebrae["L1"]),
-                label_L5=int(vertebrae["L5"]),
-                label_S1=int(vertebrae["S"]),  # S = Sacrum (label 50)
-                save_dir=preview_global,
-            )
+        cobb_results = calc_cobb_angles(
+            mri_zyx=mri.arr_zyx,
+            step2_zyx=step2.arr_zyx.astype(np.int32),
+            spacing_xyz=mri.spacing_xyz,
+            mid_sag_x=mid_sag_x,
+            label_L1=int(vertebrae["L1"]),
+            label_L5=int(vertebrae["L5"]),
+            label_S1=int(vertebrae["S"]),  # S = Sacrum (label 50)
+            save_dir=preview_global,
         )
+        report["angles"].update(cobb_results)
+        
+        # Extract global metrics: LL, SS, LSA
+        ll_value = cobb_results.get("lumbar_lordosis_LL_deg")
+        ss_value = cobb_results.get("sacral_slope_SS_deg")
+        lsa_value = cobb_results.get("lumbosacral_angle_LSA_deg")
+        
+        # Determine status based on available values
+        status = "ok"
+        if ll_value is None and ss_value is None and lsa_value is None:
+            status = "failed"
+        elif ll_value is None or ss_value is None or lsa_value is None:
+            status = "partial"
+        
+        # Build global_metrics object with rounded values (2 decimal places)
+        def _round_angle(val):
+            if val is None:
+                return None
+            try:
+                return round(float(val), 2)
+            except (ValueError, TypeError):
+                return None
+        
+        report["global_metrics"] = {
+            "ll_deg": _round_angle(ll_value),
+            "ss_deg": _round_angle(ss_value),
+            "lsa_deg": _round_angle(lsa_value),
+            "units": "degrees",
+            "status": status
+        }
     else:
         report["angles"]["status"] = "missing_required_vertebra_labels_for_LL_SS_LSA"
+        # Set global_metrics to failed status when required vertebrae are missing
+        report["global_metrics"] = {
+            "ll_deg": None,
+            "ss_deg": None,
+            "lsa_deg": None,
+            "units": "degrees",
+            "status": "failed"
+        }
 
     # -------- Herniation (LDH) --------
     report["herniation"] = calc_ldh_parameters(
@@ -5283,6 +5319,7 @@ def generate_clinical_report(mri_path: str, step2_path: str, ldh_path: str, outp
             "vertebrae": sorted(vertebrae_out.values(), key=lambda x: x.get("level", "")),
             "discs": sorted(discs_out.values(), key=lambda x: x.get("level", "")),
             "notes": old_report.get("notes", []),
+            "global_metrics": old_report.get("global_metrics", {}),
         }
 
         for v in entity_report["vertebrae"]:
