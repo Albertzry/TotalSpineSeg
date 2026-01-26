@@ -3466,17 +3466,23 @@ def calculate_lumbar_lordosis_angle(
     l1_mask: np.ndarray,
     l5_mask: np.ndarray,
     spacing_xyz: Tuple[float, float, float],
+    mask_l1_disc: Optional[np.ndarray] = None,  # T12-L1 disc (above L1)
+    mask_l5_disc: Optional[np.ndarray] = None,  # L5-S1 disc (below L5)
+    mask_spinal_canal: Optional[np.ndarray] = None,
 ) -> Optional[float]:
     """
     Calculate Lumbar Lordosis (LL) angle using Cobb method.
+    Uses the same endplate extraction method as visualization for consistency.
     
     Pre-processing:
     - Isolates vertebral body from posterior elements
     - Assumes anterior (vertebral body) is on the left side of the image
     
-    Line Fitting:
-    - L1: Fits line to superior endplate (upper boundary)
-    - L5: Fits line to inferior endplate (lower boundary)
+    Line Fitting (same as visualization):
+    - L1: Uses extract_endplate_line_by_disc_and_canal if disc and canal masks are provided,
+          otherwise falls back to fit_endplate_line
+    - L5: Uses extract_endplate_line_by_disc_and_canal if disc and canal masks are provided,
+          otherwise falls back to fit_endplate_line
     
     Calculation:
     - Computes intersection angle (Cobb angle) between the two lines
@@ -3486,6 +3492,9 @@ def calculate_lumbar_lordosis_angle(
     l1_mask : 2D binary mask for L1 vertebra (sagittal slice)
     l5_mask : 2D binary mask for L5 vertebra (sagittal slice)
     spacing_xyz : (x, y, z) spacing in mm
+    mask_l1_disc : 2D binary mask for T12-L1 disc (optional, for L1 superior endplate)
+    mask_l5_disc : 2D binary mask for L5-S1 disc (optional, for L5 inferior endplate)
+    mask_spinal_canal : 2D binary mask for spinal canal (optional)
     
     Returns:
     --------
@@ -3501,26 +3510,105 @@ def calculate_lumbar_lordosis_angle(
     if l1_body.sum() == 0 or l5_body.sum() == 0:
         return None
     
-    # Step 2: Line Fitting
-    # L1: Superior endplate (top edge)
-    l1_fit = fit_line_to_edge(l1_body, edge_type='top')
-    if l1_fit is None:
+    # Step 2: Extract L1 superior endplate using same method as visualization
+    line_l1 = None
+    
+    # Try new method first if disc and canal masks are provided
+    if mask_l1_disc is not None and mask_l1_disc.sum() > 0 and \
+       mask_spinal_canal is not None and mask_spinal_canal.sum() > 0:
+        line_l1 = extract_endplate_line_by_disc_and_canal(
+            l1_body, mask_l1_disc, mask_spinal_canal, debug_roi=None
+        )
+    
+    # Fallback to old method if new method failed
+    if line_l1 is None:
+        l1_fit_old = fit_endplate_line(l1_body, mode='superior')
+        if l1_fit_old is not None:
+            # Convert to cv2 format if needed
+            if len(l1_fit_old) == 4 and l1_fit_old[2] is not None:
+                line_l1 = l1_fit_old
+            else:
+                # Convert (k, b) to (vx, vy, x0, y0)
+                k, b = l1_fit_old[0], l1_fit_old[1]
+                if abs(k) < 1e9:
+                    vx, vy = 1.0, float(k)
+                    norm = np.sqrt(vx * vx + vy * vy)
+                    vx, vy = vx / norm, vy / norm
+                    # Use a point on the line
+                    l1_ys, l1_xs = np.where(l1_body > 0)
+                    if l1_xs.size > 0:
+                        x0 = float(l1_xs.mean())
+                        y0 = k * x0 + b
+                        line_l1 = (vx, vy, x0, y0)
+    
+    if line_l1 is None:
         return None
     
-    # L5: Inferior endplate (bottom edge)
-    l5_fit = fit_line_to_edge(l5_body, edge_type='bottom')
-    if l5_fit is None:
+    # Step 3: Extract L5 inferior endplate using same method as visualization
+    line_l5 = None
+    
+    # Try new method first if disc and canal masks are provided
+    if mask_l5_disc is not None and mask_l5_disc.sum() > 0 and \
+       mask_spinal_canal is not None and mask_spinal_canal.sum() > 0:
+        line_l5 = extract_endplate_line_by_disc_and_canal(
+            l5_body, mask_l5_disc, mask_spinal_canal, debug_roi=None
+        )
+    
+    # Fallback to old method if new method failed
+    if line_l5 is None:
+        l5_fit_old = fit_endplate_line(l5_body, mode='inferior')
+        if l5_fit_old is not None:
+            # Convert to cv2 format if needed
+            if len(l5_fit_old) == 4 and l5_fit_old[2] is not None:
+                line_l5 = l5_fit_old
+            else:
+                # Convert (k, b) to (vx, vy, x0, y0)
+                k, b = l5_fit_old[0], l5_fit_old[1]
+                if abs(k) < 1e9:
+                    vx, vy = 1.0, float(k)
+                    norm = np.sqrt(vx * vx + vy * vy)
+                    vx, vy = vx / norm, vy / norm
+                    # Use a point on the line
+                    l5_ys, l5_xs = np.where(l5_body > 0)
+                    if l5_xs.size > 0:
+                        x0 = float(l5_xs.mean())
+                        y0 = k * x0 + b
+                        line_l5 = (vx, vy, x0, y0)
+    
+    if line_l5 is None:
         return None
     
-    k1, b1 = l1_fit  # L1: y = k1*x + b1
-    k2, b2 = l5_fit  # L5: y = k2*x + b2
+    # Step 4: Convert lines to slope-intercept format for angle calculation
+    # L1 line
+    if len(line_l1) == 4 and line_l1[2] is not None:
+        # cv2.fitLine format: (vx, vy, x0, y0)
+        vx1, vy1, x01, y01 = line_l1
+        if abs(vx1) < 1e-9:
+            return None  # Vertical line, cannot calculate angle
+        k1 = float(vy1 / vx1)
+        b1 = float(y01 - k1 * x01)
+    else:
+        # np.polyfit format: (k, b, None, None)
+        k1, b1 = float(line_l1[0]), float(line_l1[1])
     
-    # Step 3: Calculate angle between the two lines
+    # L5 line
+    if len(line_l5) == 4 and line_l5[2] is not None:
+        # cv2.fitLine format: (vx, vy, x0, y0)
+        vx5, vy5, x05, y05 = line_l5
+        if abs(vx5) < 1e-9:
+            return None  # Vertical line, cannot calculate angle
+        k2 = float(vy5 / vx5)
+        b2 = float(y05 - k2 * x05)
+    else:
+        # np.polyfit format: (k, b, None, None)
+        k2, b2 = float(line_l5[0]), float(line_l5[1])
+    
+    # Step 5: Calculate angle between the two lines
     # Convert to line format for calculate_angle_between_lines
-    line_l1 = (k1, b1, None, None)
-    line_l5 = (k2, b2, None, None)
+    line_l1_formatted = (k1, b1, None, None)
+    line_l5_formatted = (k2, b2, None, None)
     
-    angle_deg = calculate_angle_between_lines(line_l1, line_l5)
+    angle_deg = calculate_angle_between_lines(line_l1_formatted, line_l5_formatted)
     
     return angle_deg
 
@@ -4651,20 +4739,28 @@ def calc_cobb_angles(
         mask_S1 = (step2_zyx == label_S1).astype(np.uint8)[:, :, mid_sag_x]
         mask_L5 = (step2_zyx == label_L5).astype(np.uint8)[:, :, mid_sag_x]
         
-        # Calculate LL using new method (with vertebral body isolation)
+        # Get disc masks for LL calculation (same as visualization)
+        # L1 superior endplate uses T12-L1 disc (label 91, above L1)
+        mask_T12L1_disc = (step2_zyx == LABEL_MAP["discs"]["T12-L1"]).astype(np.uint8)[:, :, mid_sag_x] if "T12-L1" in LABEL_MAP.get("discs", {}) else None
+        mask_L5S1_disc = (step2_zyx == LABEL_MAP["discs"]["L5-S1"]).astype(np.uint8)[:, :, mid_sag_x] if "L5-S1" in LABEL_MAP.get("discs", {}) else None
+        mask_spinal_canal = (step2_zyx == LABEL_MAP["spinal_canal"]).astype(np.uint8)[:, :, mid_sag_x] if "spinal_canal" in LABEL_MAP else None
+        
+        # Calculate LL using new method (with vertebral body isolation and same method as visualization)
         if cv2 is not None:
-            ll_new = calculate_lumbar_lordosis_angle(mask_L1, mask_L5, spacing_xyz)
+            ll_new = calculate_lumbar_lordosis_angle(
+                mask_L1, 
+                mask_L5, 
+                spacing_xyz,
+                mask_l1_disc=mask_T12L1_disc,  # T12-L1 disc for L1 superior endplate
+                mask_l5_disc=mask_L5S1_disc,    # L5-S1 disc for L5 inferior endplate
+                mask_spinal_canal=mask_spinal_canal,
+            )
             if ll_new is not None:
                 LL = ll_new  # Use the new calculation if available
                 out["lumbar_lordosis_LL_deg"] = _safe_float(LL)
         
         # Visualize Lumbar Lordosis (LL): L1 Top and L5 Bottom
         if LL is not None:
-            # Get disc masks for LL visualization
-            # L1 superior endplate uses T12-L1 disc (label 91, above L1)
-            mask_T12L1_disc = (step2_zyx == LABEL_MAP["discs"]["T12-L1"]).astype(np.uint8)[:, :, mid_sag_x] if "T12-L1" in LABEL_MAP.get("discs", {}) else None
-            mask_L5S1_disc = (step2_zyx == LABEL_MAP["discs"]["L5-S1"]).astype(np.uint8)[:, :, mid_sag_x] if "L5-S1" in LABEL_MAP.get("discs", {}) else None
-            mask_spinal_canal = (step2_zyx == LABEL_MAP["spinal_canal"]).astype(np.uint8)[:, :, mid_sag_x] if "spinal_canal" in LABEL_MAP else None
             
             visualize_LL_L1_L5(
                 slice_img=img_zy,
