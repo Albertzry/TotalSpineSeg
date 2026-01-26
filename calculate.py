@@ -5353,6 +5353,34 @@ def generate_clinical_report(mri_path: str, step2_path: str, ldh_path: str, outp
         save_dir=preview_global,
     )
 
+    # Extract herniation metrics (pd, pa, par, plr) from calc_ldh_parameters result
+    # and add to global_metrics
+    herniation_data = report.get("herniation", {})
+    if isinstance(herniation_data, dict) and herniation_data.get("status") == "ok":
+        # Extract values and round to 2 decimal places
+        pd_val = herniation_data.get("pd_mm")
+        pa_val = herniation_data.get("pa_mm2")
+        par_val = herniation_data.get("par")
+        plr_val = herniation_data.get("plr")
+        
+        # Round to 2 decimal places if not None
+        def _round_value(val):
+            if val is None:
+                return None
+            try:
+                return round(float(val), 2)
+            except (ValueError, TypeError):
+                return None
+        
+        # Update global_metrics
+        if report.get("global_metrics") is None:
+            report["global_metrics"] = {}
+        
+        report["global_metrics"]["pd_mm"] = _round_value(pd_val)
+        report["global_metrics"]["pa_mm2"] = _round_value(pa_val)
+        report["global_metrics"]["par"] = _round_value(par_val)
+        report["global_metrics"]["plr"] = _round_value(plr_val)
+
     def _pivot_entity_based(old_report: Dict[str, Any]) -> Dict[str, Any]:
         vertebrae_out: Dict[str, Dict[str, Any]] = {}
         discs_out: Dict[str, Dict[str, Any]] = {}
