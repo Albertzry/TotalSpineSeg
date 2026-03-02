@@ -1270,16 +1270,50 @@ def calc_vertebral_width_axial(
     step2_zyx: np.ndarray,
     spacing_xyz: Tuple[float, float, float],
     vertebra_label: int,
+    canal_label: int,
+    mid_sag_x: int,
     save_path: Optional[str] = None,
     name: str = "",
 ) -> Dict[str, Any]:
     """
-    Vertebral AP diameter (axial plane): Measure on the axial (transverse) plane at the geometric center.
-    Finds the Z-axis center of the vertebra and measures maximum AP distance on that axial slice.
+    Vertebral Body midline AP diameter (axial plane).
+
+    Measures *only* the vertebral body AP diameter on the axial (transverse)
+    plane at the geometric Z-center of the vertebra.  The measurement line
+    runs along the mid-sagittal column (``mid_sag_x``) from the **anterior
+    margin** of the vertebral body to the **posterior wall** of the vertebral
+    body.  The posterior wall is defined as the anterior edge of the spinal
+    canal on the same axial slice, thereby excluding pedicles, laminae, and
+    the spinous process.
+
+    Parameters
+    ----------
+    mri_zyx : np.ndarray
+        3-D MRI intensity volume (Z, Y, X).
+    step2_zyx : np.ndarray
+        3-D segmentation label volume (Z, Y, X).
+    spacing_xyz : (float, float, float)
+        Voxel spacing in mm (X, Y, Z).
+    vertebra_label : int
+        Label ID of the target vertebra in ``step2_zyx``.
+    canal_label : int
+        Label ID of the spinal canal in ``step2_zyx``.
+    mid_sag_x : int
+        X-index of the mid-sagittal slice.
+    save_path : str or None
+        If given, save a visualisation PNG at this path.
+    name : str
+        Human-readable vertebra name for the title.
+
+    Returns
+    -------
+    dict
+        ``ap_diameter_mm``, ``z_index``, ``units``, ``status``, ``method``.
     """
     sx, sy, sz = spacing_xyz  # For axial: (X, Y, Z) spacing
-    
+
     body = (step2_zyx == vertebra_label).astype(np.uint8)
+    canal = (step2_zyx == canal_label).astype(np.uint8)
     if body.sum() == 0:
         return {"ap_diameter_mm": None, "units": "mm", "status": "missing_label"}
 
@@ -1287,19 +1321,21 @@ def calc_vertebral_width_axial(
     com = _center_of_mass_idx(body)
     if com is None:
         return {"ap_diameter_mm": None, "units": "mm", "status": "failed"}
-    
+
     z_center = int(round(com[0]))
-    
-    # Extract axial slice at this Z level
-    body_axial = body[z_center, :, :]  # Shape: (Y, X)
-    mri_axial = mri_zyx[z_center, :, :]  # Shape: (Y, X)
-    
+
+    # ---------- Find a usable axial slice ----------
+    body_axial = body[z_center, :, :]       # Shape: (Y, X)
+    canal_axial = canal[z_center, :, :]     # Shape: (Y, X)
+    mri_axial = mri_zyx[z_center, :, :]     # Shape: (Y, X)
+
     if body_axial.sum() == 0:
         # Try nearby slices if center slice is empty
         for offset in [1, 2, -1, -2]:
             z_try = z_center + offset
             if 0 <= z_try < body.shape[0]:
                 body_axial = body[z_try, :, :]
+                canal_axial = canal[z_try, :, :]
                 mri_axial = mri_zyx[z_try, :, :]
                 if body_axial.sum() > 0:
                     z_center = z_try
@@ -1307,53 +1343,126 @@ def calc_vertebral_width_axial(
         if body_axial.sum() == 0:
             return {"ap_diameter_mm": None, "units": "mm", "status": "no_axial_slice", "z_index": None}
 
-    # On axial slice, measure maximum distance in Anterior-Posterior direction
-    # In axial view, AP is typically the Y direction (vertical axis of the slice)
-    ys, xs = np.where(body_axial > 0)
-    if ys.size == 0:
+    # ---------- Determine midline column ----------
+    # Use provided mid_sag_x. If it does not intersect the vertebra on this
+    # axial slice, fall back to the mean X of the vertebra mask.
+    ys_all, xs_all = np.where(body_axial > 0)
+    if ys_all.size == 0:
         return {"ap_diameter_mm": None, "units": "mm", "status": "failed", "z_index": z_center}
-    
-    y_min = int(ys.min())
-    y_max = int(ys.max())
-    ap_mm = float((y_max - y_min) * sy)
-    
-    # Also get center X for visualization
-    x_center = int(round(float(xs.mean())))
 
-    # Step 6: Visualization
+    midline_x = mid_sag_x
+    ys_at_midline = np.where(body_axial[:, midline_x] > 0)[0] if 0 <= midline_x < body_axial.shape[1] else np.array([])
+    if ys_at_midline.size == 0:
+        # Fallback: use the mean X of the vertebra mask on this slice
+        midline_x = int(round(float(xs_all.mean())))
+        ys_at_midline = np.where(body_axial[:, midline_x] > 0)[0]
+    if ys_at_midline.size == 0:
+        return {"ap_diameter_mm": None, "units": "mm", "status": "failed", "z_index": z_center}
+
+    # Full vertebra extent along the midline column
+    vert_y_min = int(ys_at_midline.min())
+    vert_y_max = int(ys_at_midline.max())
+
+    # ---------- Use canal to find posterior wall of vertebral body ----------
+    # The posterior wall of the vertebral body is defined as the anterior edge
+    # of the spinal canal.  We search along a narrow band of columns around
+    # the midline to be robust against small mis-alignments.
+    search_half_width = 3  # pixels on each side of midline_x
+    x_lo = max(0, midline_x - search_half_width)
+    x_hi = min(body_axial.shape[1], midline_x + search_half_width + 1)
+    canal_band = canal_axial[:, x_lo:x_hi]
+
+    posterior_wall_y: Optional[int] = None
+
+    if canal_band.sum() > 0:
+        canal_ys_band = np.where(canal_band > 0)[0]
+        # Determine AP direction: which end of the vertebra is closer to the
+        # canal?  That end is the posterior side.
+        canal_mean_y = float(canal_ys_band.mean())
+        vert_mid_y = (vert_y_min + vert_y_max) / 2.0
+
+        if canal_mean_y < vert_mid_y:
+            # Canal is on the low-Y side  →  low Y is posterior
+            # Posterior wall = max Y of canal band (its edge closest to vertebral body)
+            posterior_wall_y = int(canal_ys_band.max())
+            anterior_y = vert_y_max
+        else:
+            # Canal is on the high-Y side  →  high Y is posterior
+            # Posterior wall = min Y of canal band (its edge closest to vertebral body)
+            posterior_wall_y = int(canal_ys_band.min())
+            anterior_y = vert_y_min
+    else:
+        # Canal not found on this axial slice – try the mid-sagittal (ZY)
+        # plane as a fallback to at least get the A/P direction right, then
+        # use half the vertebra extent as a rough body estimate.
+        body_zy = body[:, :, mid_sag_x]
+        canal_zy = canal[:, :, mid_sag_x]
+        ant_y, post_y = _pick_anterior_posterior_from_canal(body_zy, canal_zy)
+        if ant_y == post_y == 0:
+            # Absolute fallback: full extent
+            anterior_y = vert_y_min
+            posterior_wall_y = vert_y_max
+        else:
+            # Use the direction hint but constrain to this slice
+            if abs(ant_y - vert_y_min) < abs(ant_y - vert_y_max):
+                anterior_y = vert_y_min
+                posterior_wall_y = vert_y_max
+            else:
+                anterior_y = vert_y_max
+                posterior_wall_y = vert_y_min
+
+    # Sanity: if posterior_wall_y ended up beyond / equal to anterior_y,
+    # clamp to the vertebra extent in the correct direction.
+    if posterior_wall_y is None:
+        posterior_wall_y = vert_y_max if anterior_y == vert_y_min else vert_y_min
+
+    ap_pixels = abs(anterior_y - posterior_wall_y)
+    ap_mm = float(ap_pixels * sy)
+
+    # Ensure the line endpoints are ordered (line_y_start < line_y_end)
+    line_y_start = min(anterior_y, posterior_wall_y)
+    line_y_end = max(anterior_y, posterior_wall_y)
+
+    # ---------- Visualisation ----------
     if save_path is not None:
         img_axial = _normalize_intensity_percentile(mri_axial)
-        crop = _crop_around_mask(body_axial, pad=50)  # Increased padding to show more surrounding area
+        # Use a combined mask for the crop region so the canal is visible too
+        combined_mask = np.clip(body_axial.astype(np.int16) + canal_axial.astype(np.int16), 0, 1).astype(np.uint8)
+        crop = _crop_around_mask(combined_mask, pad=50)
         img_c = _apply_crop(img_axial, crop)
         body_c = _apply_crop(body_axial, crop)
-        overlays = [("mask", {"mask": body_c > 0, "color": "lime", "alpha": 0.55})]
-        
+        canal_c = _apply_crop(canal_axial, crop)
+
+        overlays = [
+            ("mask", {"mask": body_c > 0, "color": "lime", "alpha": 0.45}),
+            ("mask", {"mask": canal_c > 0, "color": "cyan", "alpha": 0.45}),
+        ]
+
         if crop is not None:
             crop_xy = _safe_unpack_crop(crop)
             if crop_xy is not None:
                 x0, y0 = crop_xy
-                # Draw line through center connecting anterior and posterior margins
-                # Line from (x_center, y_min) to (x_center, y_max)
+                # Draw measurement line from anterior to posterior wall
                 overlays.append(
                     (
                         "line",
                         {
-                            "p0": (float(x_center - x0), float(y_min - y0)),
-                            "p1": (float(x_center - x0), float(y_max - y0)),
+                            "p0": (float(midline_x - x0), float(line_y_start - y0)),
+                            "p1": (float(midline_x - x0), float(line_y_end - y0)),
                             "color": "yellow",
                             "lw": 2,
-                            "label": f"AP {ap_mm:.1f}mm",
+                            "label": f"AP body {ap_mm:.1f}mm",
                         },
                     )
                 )
-        save_visualization(save_path, img_c, f"Vertebral AP Diameter (Axial) {name}", overlays)
+        save_visualization(save_path, img_c, f"Vertebral Body AP Diameter (Axial) {name}", overlays)
 
     return {
         "ap_diameter_mm": _safe_float(ap_mm),
         "z_index": int(z_center),
         "units": "mm",
         "status": "ok",
-        "method": "axial_plane_at_geometric_center"
+        "method": "axial_midline_body_only_canal_boundary",
     }
 
 
@@ -5297,6 +5406,8 @@ def generate_clinical_report(mri_path: str, step2_path: str, ldh_path: str, outp
             step2_zyx=step2.arr_zyx.astype(np.int32),
             spacing_xyz=mri.spacing_xyz,
             vertebra_label=int(vid),
+            canal_label=canal_label,
+            mid_sag_x=mid_sag_x,
             save_path=os.path.join(preview_vertebrae, f"vert_{vn}_ap.png"),
             name=vn,
         )
