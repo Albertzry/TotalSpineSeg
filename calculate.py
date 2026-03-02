@@ -1189,21 +1189,43 @@ def calc_vertebral_height_anterior_corrected(
                 x0, y0 = crop_xy
                 
                 # Draw anterior line (cyan) - far from canal
+                ant_p0_c = (float(anterior_line[0][0] - x0), float(anterior_line[0][1] - y0))
+                ant_p1_c = (float(anterior_line[1][0] - x0), float(anterior_line[1][1] - y0))
                 overlays.append(("line", {
-                    "p0": (float(anterior_line[0][0] - x0), float(anterior_line[0][1] - y0)),
-                    "p1": (float(anterior_line[1][0] - x0), float(anterior_line[1][1] - y0)),
+                    "p0": ant_p0_c,
+                    "p1": ant_p1_c,
                     "color": "cyan",
                     "lw": 3,
                 }))
-                
+                # Anterior height label — offset 12px to the left of midpoint
+                ant_mid_x = (ant_p0_c[0] + ant_p1_c[0]) * 0.5 - 12
+                ant_mid_y = (ant_p0_c[1] + ant_p1_c[1]) * 0.5
+                overlays.append(("text", {
+                    "xy": (ant_mid_x, ant_mid_y),
+                    "text": f"{anterior_height_mm:.1f}mm",
+                    "color": "cyan",
+                    "fontsize": 9,
+                }))
+
                 # Draw posterior line (yellow) - close to canal
+                post_p0_c = (float(posterior_line[0][0] - x0), float(posterior_line[0][1] - y0))
+                post_p1_c = (float(posterior_line[1][0] - x0), float(posterior_line[1][1] - y0))
                 overlays.append(("line", {
-                    "p0": (float(posterior_line[0][0] - x0), float(posterior_line[0][1] - y0)),
-                    "p1": (float(posterior_line[1][0] - x0), float(posterior_line[1][1] - y0)),
+                    "p0": post_p0_c,
+                    "p1": post_p1_c,
                     "color": "yellow",
                     "lw": 3,
                 }))
-                
+                # Posterior height label — offset 12px to the right of midpoint
+                post_mid_x = (post_p0_c[0] + post_p1_c[0]) * 0.5 + 12
+                post_mid_y = (post_p0_c[1] + post_p1_c[1]) * 0.5
+                overlays.append(("text", {
+                    "xy": (post_mid_x, post_mid_y),
+                    "text": f"{posterior_height_mm:.1f}mm",
+                    "color": "yellow",
+                    "fontsize": 9,
+                }))
+
                 # Draw corner points
                 corners_crop = corners.copy()
                 corners_crop[:, 0] -= x0  # Y coordinate
@@ -1217,25 +1239,25 @@ def calc_vertebral_height_anterior_corrected(
             save_visualization(save_path, img_c, f"Vertebral Height {name}", overlays)
         else:
             # Fallback: save full image
+            ant_p0_f = (float(anterior_line[0][0]), float(anterior_line[0][1]))
+            ant_p1_f = (float(anterior_line[1][0]), float(anterior_line[1][1]))
+            post_p0_f = (float(posterior_line[0][0]), float(posterior_line[0][1]))
+            post_p1_f = (float(posterior_line[1][0]), float(posterior_line[1][1]))
             overlays = [
                 ("mask", {"mask": body_body_only > 0, "color": "lime", "alpha": 0.55}),
-                ("line", {
-                    "p0": (float(anterior_line[0][0]), float(anterior_line[0][1])),
-                    "p1": (float(anterior_line[1][0]), float(anterior_line[1][1])),
-                    "color": "cyan",
-                    "lw": 3,
+                ("line", {"p0": ant_p0_f, "p1": ant_p1_f, "color": "cyan", "lw": 3}),
+                ("text", {
+                    "xy": ((ant_p0_f[0] + ant_p1_f[0]) * 0.5 - 12, (ant_p0_f[1] + ant_p1_f[1]) * 0.5),
+                    "text": f"{anterior_height_mm:.1f}mm",
+                    "color": "cyan", "fontsize": 9,
                 }),
-                ("line", {
-                    "p0": (float(posterior_line[0][0]), float(posterior_line[0][1])),
-                    "p1": (float(posterior_line[1][0]), float(posterior_line[1][1])),
-                    "color": "yellow",
-                    "lw": 3,
+                ("line", {"p0": post_p0_f, "p1": post_p1_f, "color": "yellow", "lw": 3}),
+                ("text", {
+                    "xy": ((post_p0_f[0] + post_p1_f[0]) * 0.5 + 12, (post_p0_f[1] + post_p1_f[1]) * 0.5),
+                    "text": f"{posterior_height_mm:.1f}mm",
+                    "color": "yellow", "fontsize": 9,
                 }),
-                ("scatter", {
-                    "pts": corners,
-                    "color": "red",
-                    "s": 80
-                }),
+                ("scatter", {"pts": corners, "color": "red", "s": 80}),
             ]
             save_visualization(save_path, img_zy, f"Vertebral Height {name}", overlays)
     
@@ -1519,11 +1541,14 @@ def calc_disc_height_corrected(
                 if crop_xy is not None:
                     x0, y0 = crop_xy
                     y_mid = int(round(float(y_coords.mean())))
-                    overlays.append(("line", {
-                        "p0": (float(y_mid - x0), float(z_min - y0)),
-                        "p1": (float(y_mid - x0), float(z_max - y0)),
-                        "color": "yellow",
-                        "lw": 2,
+                    fb_p0 = (float(y_mid - x0), float(z_min - y0))
+                    fb_p1 = (float(y_mid - x0), float(z_max - y0))
+                    overlays.append(("line", {"p0": fb_p0, "p1": fb_p1, "color": "yellow", "lw": 2}))
+                    # Label offset 10px to the right of the line
+                    overlays.append(("text", {
+                        "xy": (fb_p0[0] + 10, (fb_p0[1] + fb_p1[1]) * 0.5),
+                        "text": f"{dh_mm:.1f}mm",
+                        "color": "yellow", "fontsize": 9,
                     }))
                 save_visualization(save_path, img_c, f"Disc Height (Fallback) {name}", overlays)
         
@@ -1654,24 +1679,35 @@ def calc_disc_height_corrected(
                 x0, y0 = crop_xy
                 
                 # Draw measurement lines (mathematically guaranteed to be perpendicular to disc axis)
-                labels = ["P", "M", "A"]  # 0.25位置=后(P), 0.50位置=中(M), 0.75位置=前(A)
+                lbl_names = ["P", "M", "A"]  # 0.25=Posterior, 0.50=Middle, 0.75=Anterior
                 for i, (pt_top, pt_bottom, height_mm) in enumerate(lines_visual):
-                    # Convert to crop coordinates
-                    # pt_top and pt_bottom are (x, y) where x is Y (column), y is Z (row)
                     p_top_crop = (float(pt_top[0] - x0), float(pt_top[1] - y0))
                     p_bot_crop = (float(pt_bottom[0] - x0), float(pt_bottom[1] - y0))
-                    
-                    overlays.append(
-                        (
-                            "line",
-                            {
-                                "p0": p_top_crop,
-                                "p1": p_bot_crop,
-                                "color": "yellow",
-                                "lw": 2,
-                            },
-                        )
-                    )
+                    overlays.append(("line", {"p0": p_top_crop, "p1": p_bot_crop, "color": "yellow", "lw": 2}))
+                    # Label to the right of the line midpoint (+10px x offset)
+                    lname = lbl_names[i] if i < len(lbl_names) else f"L{i+1}"
+                    mid_x = (p_top_crop[0] + p_bot_crop[0]) * 0.5 + 10
+                    mid_y = (p_top_crop[1] + p_bot_crop[1]) * 0.5
+                    overlays.append(("text", {
+                        "xy": (mid_x, mid_y),
+                        "text": f"{lname}:{height_mm:.1f}",
+                        "color": "yellow", "fontsize": 8,
+                    }))
+
+                # Summary box: DH avg + HDR + DHI in top-left corner of crop
+                crop_h = img_c.shape[0] if img_c is not None else 60
+                summary_parts = [f"DH={dh_mm:.1f}mm"]
+                if ap_mm is not None:
+                    summary_parts.append(f"APD={ap_mm:.1f}mm")
+                if hdr is not None:
+                    summary_parts.append(f"HDR={hdr:.2f}")
+                if dhi is not None:
+                    summary_parts.append(f"DHI={dhi:.2f}")
+                overlays.append(("text", {
+                    "xy": (4, 4),
+                    "text": "  ".join(summary_parts),
+                    "color": "white", "fontsize": 8,
+                }))
 
         save_visualization(save_path, img_c, f"Disc Height (Linear Regression) {name}", overlays)
 
@@ -3925,10 +3961,15 @@ def draw_cobb_visualization(
     # Draw solid lines on endplates (thinner)
     overlays.append(("line", {"p0": m1_solid_p0, "p1": m1_solid_p1, "color": color1, "lw": 1.5, "linestyle": "-"}))
     overlays.append(("line", {"p0": m2_solid_p0, "p1": m2_solid_p1, "color": color2, "lw": 1.5, "linestyle": "-"}))
-    
-    # Removed: dashed extension lines, angle arc, and intersection point
-    # Only keep the two solid line segments
-    
+
+    # Angle label — placed in top-left corner
+    if angle_deg is not None:
+        overlays.append(("text", {
+            "xy": (4, 4),
+            "text": f"{angle_deg:.1f}°",
+            "color": "white", "fontsize": 11,
+        }))
+
     save_visualization(save_path, slice_img, title, overlays)
 
 
@@ -4502,7 +4543,15 @@ def visualize_SS_S1(
             "color": "red",
             "lw": 1.5,
         }))
-    
+
+    # Angle label — placed in top-left corner
+    if angle_deg is not None:
+        overlays.append(("text", {
+            "xy": (4, 4),
+            "text": f"{angle_deg:.1f}°",
+            "color": "white", "fontsize": 11,
+        }))
+
     save_visualization(save_path, slice_img, title, overlays)
 
 
@@ -4684,7 +4733,14 @@ def visualize_DIA(
             # Fallback for vertical line
             if 0 <= x0_lower < w:
                 overlays.append(("line", {"p0": (x0_lower, 0), "p1": (x0_lower, h - 1), "color": "magenta", "lw": 1, "linestyle": "-"}))
-    
+
+    # Angle label — placed in top-left corner
+    overlays.append(("text", {
+        "xy": (4, 4),
+        "text": f"{angle_deg:.1f}°",
+        "color": "white", "fontsize": 11,
+    }))
+
     save_visualization(save_path, slice_img, f"Disc Inclination Angle {name}", overlays)
 
 
