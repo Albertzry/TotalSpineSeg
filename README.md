@@ -1,261 +1,350 @@
-# TotalSpineSeg
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.13894354.svg)](https://doi.org/10.5281/zenodo.13894354)
+# TotalSpineSeg-v2
 
-TotalSpineSeg is a tool for automatic instance segmentation of all vertebrae, intervertebral discs (IVDs), spinal cord, and spinal canal in MRI images. It is robust to various MRI contrasts, acquisition orientations, and resolutions. The model used in TotalSpineSeg is based on [nnU-Net](https://github.com/MIC-DKFZ/nnUNet) as the backbone for training and inference.
+> **Note:** This project is based on [TotalSpineSeg](https://github.com/neuropoly/totalspineseg) by [NeuroPoly Lab](https://neuro.polymtl.ca/). We have made significant architectural extensions on top of the original project, including a two-stage lumbar intervertebral disc degeneration (IVD degeneration) segmentation pipeline, a comprehensive clinical parameter computation module, and an end-to-end inference workflow. Please see the [Acknowledgments](#acknowledgments) section for the original citation.
 
-If you use this model, please cite our work:
-> Warszawer Y, Molinier N, Valošek J, Shirbint E, Benveniste PL, Achiron A, Eshaghi A and Cohen-Adad J. _Fully Automatic Vertebrae and Spinal Cord Segmentation Using a Hybrid Approach Combining nnU-Net and Iterative Algorithm_.	Proceedings of the 32th Annual Meeting of ISMRM. 2024
-
-Please also cite nnU-Net since our work is heavily based on it:
-> Isensee, F., Jaeger, P. F., Kohl, S. A., Petersen, J., & Maier-Hein, K. H. (2021). nnU-Net: a self-configuring method for deep learning-based biomedical image segmentation. Nature methods, 18(2), 203-211.
-
-![Thumbnail](https://github.com/user-attachments/assets/2c1b1ff9-daaa-479f-8d21-01a66b9c9cb4)
+---
 
 ## Table of Contents
 
-- [Model Description](#model-description)
-- [Datasets](#datasets)
+- [Overview](#overview)
+- [Key Features](#key-features)
+- [Architecture](#architecture)
+  - [Stage 1 — Coarse Segmentation & Landmarks (Dataset 101)](#stage-1--coarse-segmentation--landmarks-dataset-101)
+  - [Stage 2 — Fine-Grained Labeling (Dataset 102)](#stage-2--fine-grained-labeling-dataset-102)
+  - [Stage 3 — IVD Degeneration Two-Stage Detection & Segmentation (Dataset 105)](#stage-3--ivd-degeneration-two-stage-detection--segmentation-dataset-105)
+  - [Clinical Parameter Computation](#clinical-parameter-computation)
+- [Project Structure](#project-structure)
 - [Dependencies](#dependencies)
 - [Installation](#installation)
-- [Training](#training)
 - [Inference](#inference)
-- [Localizer based labeling](#localizer-based-labeling)
-- [Results](#results)
+  - [Spine Segmentation (Step 1 & Step 2)](#spine-segmentation-step-1--step-2)
+  - [IVD Degeneration Inference (Two-Stage Pipeline)](#ivd-degeneration-inference-two-stage-pipeline)
+  - [Clinical Report Generation](#clinical-report-generation)
+- [Training](#training)
+  - [Step 1 & Step 2 Training](#step-1--step-2-training)
+  - [IVD Degeneration Two-Stage Training (Dataset 105)](#ivd-degeneration-two-stage-training-dataset-105)
+- [Output Data Structure](#output-data-structure)
 - [List of Classes](#list-of-classes)
+- [Documentation](#documentation)
+- [Acknowledgments](#acknowledgments)
+- [License](#license)
 
-## Model Description
+---
 
-TotalSpineSeg uses an hybrid approach that integrates nnU-Net with an iterative algorithm for instance segmentation and labeling of vertebrae, intervertebral discs (IVDs), spinal cord, and spinal canal. The process involves two main steps:
+## Overview
 
-**Step 1**: An nnU-Net model (`Dataset101`) is used to identify nine classes in total. This includes four semantic classes: spinal cord, spinal canal, IVDs, and vertebrae and five landmark classes: C2-C3, C7-T1, T12-L1, and L5-S, which represent key IVDs along the spine, as well as the C1 vertebra to determine whether the MRI images cover C1 (Figure 1B). The output segmentation is then processed using an iterative algorithm to map individual IVDs, from which odd IVDs segmentation are extracted (Figure 1C).
+**TotalSpineSeg-v2** is a comprehensive tool for automatic analysis of spinal MRI images. Building upon the original [TotalSpineSeg](https://github.com/neuropoly/totalspineseg), this project extends the pipeline with:
 
-**Step 2:** A second nnU-Net model (`Dataset102`) is then used to identify ten classes in total. This includes five semantic classes: spinal cord, spinal canal, IVDs, odd vertebrae, and even vertebrae and five landmark classes: C2-C3, C7-T1, T12-L1, and L5-S, which represent the same key IVDs along the spine, as well as the sacrum (Figure 1D). This model uses two input channels: the MRI image (Figure 1A) and the odd IVDs extracted from the first step (Figure 1C). The output segmentation is finally processed using an algorithm that assigns individual labels to each vertebra and IVD to generate the final segmentation (Figure 1F).
+1. **Full-spine instance segmentation** — Automatic segmentation and labeling of all vertebrae (C1–L5), intervertebral discs (IVDs), sacrum, spinal cord, and spinal canal, robust to various MRI contrasts, acquisition orientations, and resolutions.
+2. **Two-stage IVD degeneration detection and segmentation** — A novel pipeline that detects and segments lumbar intervertebral disc degeneration using anatomical priors and surface-aware loss functions.
+3. **Clinical measurement computation** — Automated calculation of clinically relevant spinal parameters (vertebral height, disc height, Cobb angles, lumbar lordosis, sacral slope, lumbosacral angle, disc inclination angle, IVD degeneration protrusion metrics, etc.) with visualization.
 
-For comparison, we also trained a single model (`Dataset103`) that outputs individual label values for each vertebra and IVD in a single step.
+The model backbone is based on [nnU-Net](https://github.com/MIC-DKFZ/nnUNet).
 
-![Figure 1](https://github.com/user-attachments/assets/9017fb8e-bed5-413f-a80f-b123a97f5735)
+---
 
-**Figure 1**: Illustration of the hybrid method for automatic segmentation of spinal structures. (A) Input MRI image. (B) Step 1 model prediction. (C) Odd IVDs extraction from the Step1 prediction. (D) Step 2 model prediction. (E) Final segmentation with individual labels for each vertebra and IVD.
+## Key Features
 
-## Datasets
+| Feature | Description |
+|:--------|:------------|
+| **Multi-stage Spine Segmentation** | Step 1 (9-class coarse segmentation + landmark detection) → Step 2 (11-class fine-grained labeling with odd/even vertebrae) |
+| **IVD Degeneration Two-Stage Pipeline** | Stage A (disc-level binary detection using 3D ResNet with SE attention) → Stage B (ROI-based fine segmentation using lightweight 3D U-Net with SDM supervision) |
+| **Anatomical Prior Injection** | Disc index maps, disc boundary attention, disc–canal interface attention, and inter-vertebral space attention |
+| **Comprehensive Clinical Report** | JSON-based report with vertebral heights, disc heights, HDR/DHI, sagittal alignment angles (LL, SS, LSA, DIA), IVD degeneration parameters (PD, PA, PAR, PLR), and disc signal intensity |
+| **Visualization** | Automatic generation of measurement preview images with annotated overlays |
+| **Localizer Support** | Improved labeling for limited FOV images using localizer-based reference |
+| **Multi-contrast Robustness** | Validated on T1w, T2w, STIR, MTS, T2*, and even CT images |
 
-The totalspineseg model was trained on these 3 main datasets:
-- [whole-spine](https://openneuro.org/datasets/ds005616/versions/1.0.0) dataset (Internal access: `git@data.neuro.polymtl.ca:datasets/whole-spine.git`).
-- [SPIDER](https://doi.org/10.5281/zenodo.10159290) project dataset (Internal access: `git@data.neuro.polymtl.ca:datasets/spider-challenge-2023.git`)
-- [Spine Generic Project](https://github.com/spine-generic), including single and multi subject datasets (Public access: `git@github.com:spine-generic/data-single-subject.git` and `git@github.com:spine-generic/data-multi-subject.git`).
+---
 
-We used manual labels from the SPIDER dataset. For other datasets, we generated initial labels by registering MRIs to the PAM50 template using [Spinal Cord Toolbox (SCT)](https://spinalcordtoolbox.com/). We trained an initial segmentation model with these labels, applied it to the datasets, and manually corrected the outputs using [3D Slicer](https://www.slicer.org/).
+## Architecture
 
-Additional public datasets were used during this project to generate sacrum segmentations:
-- [GoldAtlas](https://zenodo.org/records/583096) (Internal access: `git@data.neuro.polymtl.ca:datasets/goldatlas.git`)
-- [SynthRAD2023](https://synthrad2023.grand-challenge.org/) (Internal access: `git@data.neuro.polymtl.ca:datasets/synthrad-challenge-2023.git`)
-- [MRSpineSeg](https://paperswithcode.com/dataset/mrspineseg-challenge) (Internal access: `git@data.neuro.polymtl.ca:datasets/mrspineseg-challenge-2021.git`)
+### Stage 1 — Coarse Segmentation & Landmarks (Dataset 101)
 
-When not available, sacrum segmentations were generated using the [totalsegmentator](https://github.com/wasserth/TotalSegmentator) model. For more information, please see [this issue](https://github.com/neuropoly/totalspineseg/issues/18).
+- **Input**: Single-channel MRI (resampled to 1mm isotropic, reoriented to LPI)
+- **Output**: 9 classes — spinal cord, spinal canal, IVDs, vertebrae, and 5 landmark classes (C2–C3, C7–T1, T12–L1, L5–S key discs and C1 vertebra)
+- **Post-processing**: Iterative labeling algorithm assigns anatomical indices; odd-numbered IVDs are extracted for Step 2
+
+### Stage 2 — Fine-Grained Labeling (Dataset 102)
+
+- **Input**: 2-channel — MRI image + odd IVD mask from Step 1
+- **Output**: 11 classes — spinal cord, spinal canal, IVDs, odd/even vertebrae, sacrum, and 4 landmark discs
+- **Post-processing**: Iterative labeling reconstructs C1–L5 + sacrum labels; canal filling ensures anatomical continuity
+
+### Stage 3 — IVD Degeneration Two-Stage Detection & Segmentation (Dataset 105)
+
+A novel two-stage pipeline designed specifically for the extreme class imbalance and tiny lesion volume of lumbar intervertebral disc degeneration:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  Stage A — Detection (Disc-level Binary Classification)          │
+│  • Input: MRI patch (96³) + disc_mask + disc_index_map          │
+│  • Model: StageADetectorV2 (Residual 3D CNN + SE attention)     │
+│  • Loss: Focal Loss (γ=2)                                       │
+│  • Output: has_IVD (0 or 1) per disc level                       │
+└──────────────────────────────────────┬───────────────────────────┘
+                                       ↓ (positive discs only)
+┌──────────────────────────────────────────────────────────────────┐
+│  Stage B — Fine Segmentation (ROI-based IVD Mask Prediction)     │
+│  • Input: MRI ROI (48³) + disc_mask + disc_index_map            │
+│  • Model: SmallUNet3D (3-level 3D U-Net, dual-head)             │
+│  • Loss: FocalTversky + Boundary + L1(SDM)                      │
+│  • Output: IVD degeneration binary mask + signed distance map (SDM) │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Key innovations:**
+- **Disc Index Maps**: Normalized positional encoding (0–1) derived from Step 2 vertebra labels, providing spatial priors
+- **Mandatory 4-Class Sampling**: Each disc generates 4 patch types (IVD degeneration center, IVD degeneration boundary, disc boundary negative, disc interior negative) to ensure balanced training
+- **Surface-Aware Supervision**: Signed distance map (SDM) regression forces the network to learn boundary geometry
+- **Anatomical Attention**: Multi-level attention maps (disc boundary, disc–canal interface, inter-vertebral space) constrain predictions to anatomically plausible regions
+
+### Clinical Parameter Computation
+
+The `calculate.py` module provides automated computation of clinically relevant spinal measurements:
+
+| Category | Parameters |
+|:---------|:-----------|
+| **Vertebral Morphometry** | Anterior/posterior vertebral height (VH), vertebral body AP diameter |
+| **Disc Morphometry** | Disc height (DH) at anterior/mid/posterior locations, height-to-disc ratio (HDR), disc height index (DHI) |
+| **Sagittal Alignment** | Lumbar Lordosis (LL), Sacral Slope (SS), Lumbosacral Angle (LSA) |
+| **Disc Angles** | Disc Inclination Angle (DIA) per level |
+| **IVD Degeneration Parameters** | Protrusion Distance (PD), Protrusion Area (PA), PA Ratio (PAR), Protrusion-to-Length Ratio (PLR) |
+| **Signal Analysis** | Average Gray Level (AGL) per disc |
+
+All measurements are output as a structured JSON report with accompanying visualization images.
+
+---
+
+## Project Structure
+
+```
+TotalSpineSeg-v2/
+├── totalspineseg/                  # Core package
+│   ├── __init__.py                 # Package exports
+│   ├── inference.py                # Main spine segmentation inference (Step 1 & Step 2)
+│   ├── init_inference.py           # Model initialization & weight download
+│   ├── ldh_twostage/               # ★ NEW: IVD degeneration two-stage pipeline module
+│   │   ├── models.py               #   StageADetectorV2 + SmallUNet3D architectures
+│   │   ├── losses.py               #   FocalTversky, Boundary, SDM losses
+│   │   ├── sampling.py             #   Mandatory 4-class patch sampling
+│   │   ├── disc_index.py           #   Disc index map generation from Step 2 labels
+│   │   ├── distance_maps.py        #   Signed distance map computation
+│   │   ├── data.py                 #   PyTorch Dataset classes
+│   │   └── metrics.py              #   Evaluation metrics
+│   ├── nnunet_extensions/          # nnU-Net trainer extensions
+│   ├── resources/                  # Label maps & dataset configurations
+│   │   ├── labels_maps/            #   tss_map.json, nnunet_step1/2/5_ldh.json, etc.
+│   │   └── datasets/              #   Dataset configurations
+│   └── utils/                      # Utility modules
+│       ├── iterative_label.py      #   Iterative anatomical labeling algorithm
+│       ├── predict_nnunet.py       #   nnU-Net prediction wrapper (with monkeypatch)
+│       ├── extract_alternate.py    #   Odd/even disc extraction
+│       ├── extract_levels.py       #   Disc level extraction
+│       ├── fill_canal.py           #   Canal topology repair
+│       ├── resample.py             #   Image resampling
+│       └── ...                     #   Other utilities
+│
+├── calculate.py                    # ★ NEW: Clinical parameter computation & report generation
+├── example_usage.py                # Usage examples for programmatic integration
+│
+├── scripts/                        # Training & inference scripts
+│   ├── prepare_dataset_105.py      # ★ NEW: Dataset 105 (IVD degeneration) data preparation
+│   ├── train_ldh_stage_a.py        # ★ NEW: IVD degeneration Stage A training
+│   ├── train_ldh_stage_b.py        # ★ NEW: IVD degeneration Stage B training
+│   ├── infer_ldh.py                # ★ NEW: End-to-end IVD degeneration inference pipeline
+│   ├── eval_ldh.py                 # ★ NEW: IVD degeneration evaluation
+│   ├── prepare_datasets.sh         #   Dataset 101/102/103 preparation
+│   ├── download_datasets.sh        #   Dataset download
+│   └── train.sh                    #   Unified training entry point
+│
+├── docs/                           # Documentation
+│   ├── LDH_TwoStage_Pipeline.md   #   Detailed IVD degeneration pipeline documentation
+│   ├── LDH_Quick_Reference_CN.md  #   IVD degeneration quick reference (Chinese)
+│   ├── Step1_2_5_Technical_Report_bilingual.md  # Technical report
+│   └── ...                         #   Other documentation
+│
+├── pyproject.toml                  # Package configuration
+├── LICENSE                         # License file
+└── README.md                       # This file
+```
+
+---
 
 ## Dependencies
 
-- `bash` terminal
-- [Python](https://www.python.org/) >= 3.10, with pip >= 23 and setuptools >= 67
+- **Python** >= 3.10, with pip >= 23 and setuptools >= 67
+- **PyTorch** < 2.6 (with CUDA support recommended)
+- **nnU-Net v2** (backbone for Step 1 and Step 2 training/inference)
+- Key libraries: `nibabel`, `SimpleITK`, `nilearn`, `scipy`, `torchio`, `gryds`, `tqdm`, `matplotlib`
+
+---
 
 ## Installation
 
-1. Open a `bash` terminal in the directory where you want to work.
-
-2. Create the installation directory:
-```bash
-mkdir TotalSpineSeg
-cd TotalSpineSeg
-```
-
-3. Create and activate a virtual environment using one of the following options (highly recommended):
-   - venv
+1. Create and activate a virtual environment:
    ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
-   - conda env
-   ```
-   conda create -n myenv python=3.10
-   conda activate myenv
+   conda create -n tss python=3.10
+   conda activate tss
    ```
 
-4. Install this repository using one of the following options:
-   - Git clone (for developpers)
-   > **Note:** If you pull a new version from GitHub, make sure to rerun this command with the flag `--upgrade`
+2. Install TotalSpineSeg-v2:
    ```bash
-   git clone https://github.com/neuropoly/totalspineseg.git
-   python3 -m pip install -e totalspineseg[nnunetv2]
+   git clone <repository-url> TotalSpineSeg-v2
+   cd TotalSpineSeg-v2
+   python3 -m pip install -e .[nnunetv2]
    ```
-   - PyPI installation (for inference only)
-   ```
-   python3 -m pip install totalspineseg[nnunetv2]
-   ```
-   - PyPI installation (with specific nnU-Net version)
+
+3. Install PyTorch with CUDA support:
    ```bash
-   # Note: Use "[nnunetv2]" to stick to tested versions of nnunetv2
-   python3 -m pip install totalspineseg nnunetv2==2.6.2
+   python3 -m pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
+       --index-url https://download.pytorch.org/whl/cu118 --upgrade
    ```
 
-5. For CUDA GPU support, install **PyTorch<2.6** following the instructions on their [website](https://pytorch.org/). Be sure to add the `--upgrade` flag to your installation command to replace any existing PyTorch installation.
-   Example:
-```bash
-python3 -m pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu118 --upgrade
-```
+4. (Optional) Set model data directory:
+   ```bash
+   export TOTALSPINESEG_DATA="/path/to/data"
+   ```
 
-6. **OPTIONAL STEP:** Define a folder where weights will be stored:
-> By default, weights will be stored in the package under `totalspineseg/models`
- ```bash
- mkdir data
- export TOTALSPINESEG_DATA="$(realpath data)"
- ```
-
-## Training
-
-To train the TotalSpineSeg model, you will need the following hardware specifications:
-- Approximately 3.5TB of available disk space (for training with data augmentation)
-- RAM capacity of at least 32GB
-- CUDA GPU with at least 8GB of VRAM
-
-Please ensure that your system meets these requirements before proceeding with the training process.
-
-1. Make sure that the `bash` terminal is opened with the virtual environment activated (see [Installation](#installation)).
-
-2. Ensure training dependencies are installed:
-```bash
-apt-get install git git-annex jq -y
-```
-
-3. Set the path to TotalSpineSeg and data folders in the virtual environment:
-```bash
-mkdir data
-export TOTALSPINESEG="$(realpath totalspineseg)"
-export TOTALSPINESEG_DATA="$(realpath data)"
-echo "export TOTALSPINESEG=\"$TOTALSPINESEG\"" >> venv/bin/activate
-echo "export TOTALSPINESEG_DATA=\"$TOTALSPINESEG_DATA\"" >> venv/bin/activate
-```
-
-4. Download the required datasets into `$TOTALSPINESEG_DATA/bids` (make sure you have access to the specified repositories):
-```bash
-bash "$TOTALSPINESEG"/scripts/download_datasets.sh
-```
-
-5. Temporary step (until all labels are pushed into the repositories) - Download labels into `$TOTALSPINESEG_DATA/bids`:
-```bash
-curl -L -O https://github.com/neuropoly/totalspineseg/releases/download/labels/labels_iso_bids_0924.zip
-unzip -qo labels_iso_bids_0924.zip -d "$TOTALSPINESEG_DATA"
-rm labels_iso_bids_0924.zip
-```
-
-6. Prepare datasets in nnUNetv2 structure into `$TOTALSPINESEG_DATA/nnUnet`:
-```bash
-bash "$TOTALSPINESEG"/scripts/prepare_datasets.sh [DATASET_ID] [-noaug]
-```
-
-   The script optionally accepts `DATASET_ID` as the first positional argument to specify the dataset to prepare. It can be either 101, 102, 103, or all. If `all` is specified, it will prepare all datasets (101, 102, 103). By default, it will prepare datasets 101 and 102.
-
-   Additionally, you can use the `-noaug` parameter to prepare the datasets without data augmentations.
-
-7. Train the model:
-```bash
-bash "$TOTALSPINESEG"/scripts/train.sh [DATASET_ID [FOLD]]
-```
-
-   The script optionally accepts `DATASET_ID` as the first positional argument to specify the dataset to train. It can be either 101, 102, 103, or all. If `all` is specified, it will train all datasets (101, 102, 103). By default, it will train datasets 101 and 102.
-
-   Additionally, you can specify `FOLD` as the second positional argument to specify the fold. It can be either 0, 1, 2, 3, 4, 5 or all. By default, it will train with fold 0.
+---
 
 ## Inference
 
-1. Make sure that the `bash` terminal is opened with the virtual environment activated (see [Installation](#installation)).
+### Spine Segmentation (Step 1 & Step 2)
 
-2. Run the model on a folder containing niftii images (`.nii.gz` or `.nii`), or on a single niftii file:
-> If you haven't trained the model, the script will automatically download the pre-trained models from the GitHub release.
 ```bash
+# Process a single NIfTI file or folder
 totalspineseg INPUT OUTPUT_FOLDER [--step1] [--iso]
-```
 
-   This will process the images in INPUT or the single image and save the results in OUTPUT_FOLDER.
+# Examples
+totalspineseg input.nii.gz output_folder
+totalspineseg input_folder output_folder --iso --device cuda
 
-   **Important Note:** By default, the output segmentations are resampled back to the input image space. If you prefer to obtain the outputs in the model's original 1mm isotropic resolution, especially useful for visualization purposes, we strongly recommend using the `--iso` argument.
-
-   Additionally, you can use the `--step1` parameter to run only the step 1 model, which outputs a single label for all vertebrae, including the sacrum.
-
-   For more options, you can use the `--help` parameter:
-```bash
-totalspineseg --help
-```
-
-**Output Data Structure:**
-
-```
-output_folder/
-├── input/                   # Preprocessed input images
-├── preview/                 # Preview images for all steps
-├── step1_raw/               # Raw outputs from step 1 model
-├── step1_output/            # Results of iterative labeling algorithm for step 1
-├── step1_cord/              # Spinal cord soft segmentations
-├── step1_canal/             # Spinal canal soft segmentations
-├── step1_levels/            # Single voxel in canal centerline at each IVD level
-├── step2_raw/               # Raw outputs from step 2 model
-└── step2_output/            # Results of iterative labeling algorithm for step 2 (final output)
-```
-
-**Important Note:** While TotalSpineSeg provides spinal cord segmentation, it is not intended to replace validated methods for cross-sectional area (CSA) analysis. The spinal cord segmentation from TotalSpineSeg has not been validated for CSA measurements, nor has it been tested on cases involving spinal cord compressions, MS lesions, or other spinal cord abnormalities. For accurate CSA analysis, we strongly recommend using the validated algorithms available in the [Spinal Cord Toolbox](https://spinalcordtoolbox.com/user_section/tutorials/segmentation.html).
-
-Key points:
-- All segmentations in NIfTI format (`.nii.gz`)
-- Preview images in JPEG format
-- step1_levels: single voxel in canal centerline at each IVD level, numbered from C1 (1 above C1, 2 above C2, etc.)
-- step2_output: final labeled vertebrae, discs, cord, and canal
-
-## Localizer based labeling
-
-TotalSpineSeg supports using localizer images to improve the labeling process, particularly useful for images with different fields of view (FOV) where landmarks like C1 and sacrum may not be visible. It uses localizer information to accurately label vertebrae and discs in the main image.
-
-![Localizer](https://github.com/user-attachments/assets/c00ec3b6-2f04-4bbc-be08-b7ae1373b6ae)
-
-Example of directory structure:
-
-```
-.
-├── images/
-│   ├── sub-01_T2w.nii.gz
-│   └── sub-02_T2w.nii.gz
-└── localizers/
-    ├── sub-01_T1w.nii.gz
-    └── sub-02_T1w.nii.gz
-```
-
-In this example, main images are placed in the `images` folder and corresponding localizer images in the `localizers` folder.
-
-To use localizer-based labeling:
-
-```bash
-# Process localizer images. We recommend using the --iso flag for the localizer to ensure consistent resolution.
+# With localizer for limited FOV images
 totalspineseg localizers localizers_output --iso
-
-# Run model on main images using localizer output
 totalspineseg images output --loc localizers_output/step2_output --suffix _T2w --loc-suffix _T1w
 ```
 
-- `--loc`: Specifies the path to the localizer output
-- `--suffix`: Suffix for the main images (e.g., "_T2w")
-- `--loc-suffix`: Suffix for the localizer images (e.g., "_T1w")
+For full options, run `totalspineseg --help`.
 
-Note: If the localizer and main image files have the same names, you can omit the `--suffix` and `--loc-suffix` arguments.
+### IVD Degeneration Inference (Two-Stage Pipeline)
 
-## Results
+```bash
+python scripts/infer_ldh.py \
+    --input-dir /path/to/input \
+    --output-dir /path/to/output \
+    --device cuda
+```
 
-TotalSpineSeg demonstrates robust performance across a wide range of imaging parameters. Here are some examples of the model output:
+The IVD degeneration inference pipeline will:
+1. Run Step 1 + Step 2 to obtain full anatomical segmentation
+2. Generate disc index maps from Step 2 labels
+3. For each lumbar disc level (L1/L2 to L5/S1):
+   - **Stage A**: Detect whether IVD degeneration is present
+   - **Stage B** (if positive): Segment the IVD degeneration region in a focused ROI
+4. Aggregate all disc-level predictions into a final IVD degeneration mask
 
-![Model Output Preview](https://github.com/user-attachments/assets/b4c85ce8-c59b-4ab1-b02a-37638c9ac375)
+### Clinical Report Generation
 
-The examples shown above include segmentation results on various contrasts (T1w, T2w, STIR, MTS, T2star, and even CT images), acquisition orientations (sagittal, axial), and resolutions.
+```bash
+python calculate.py \
+    --input-dir /path/to/processed_cases \
+    --output-dir /path/to/reports
+```
+
+This generates:
+- **JSON report** with all clinical measurements (vertebral height, disc height, Cobb angles, IVD degeneration parameters, etc.)
+- **Visualization images** with annotated measurement overlays for each parameter
+
+---
+
+## Training
+
+### Step 1 & Step 2 Training
+
+**Hardware requirements:**
+- ~3.5 TB disk space (with data augmentation)
+- ≥32 GB RAM
+- CUDA GPU with ≥8 GB VRAM
+
+```bash
+# Set environment variables
+export TOTALSPINESEG="$(realpath .)"
+export TOTALSPINESEG_DATA="/path/to/data"
+
+# Download datasets
+bash scripts/download_datasets.sh
+
+# Prepare nnUNet datasets
+bash scripts/prepare_datasets.sh [101|102|103|all] [-noaug]
+
+# Train
+bash scripts/train.sh [DATASET_ID [FOLD]]
+```
+
+### IVD Degeneration Two-Stage Training (Dataset 105)
+
+```bash
+# 1. Prepare Dataset 105 (generates Stage A patches + Stage B ROIs)
+python scripts/prepare_dataset_105.py \
+    --stagea-patch 96 \
+    --stageb-roi 48 \
+    --device cuda
+
+# 2. Train (one command runs both stages + evaluation)
+bash scripts/train.sh 105 0
+
+# Or run stages individually:
+python scripts/train_ldh_stage_a.py --epochs 50 --batch-size 32 --lr 1e-3
+python scripts/train_ldh_stage_b.py --epochs 200 --batch-size 16 --lr 1e-4
+
+# 3. Evaluate
+python scripts/eval_ldh.py \
+    --ckpt-dir /path/to/checkpoints \
+    --device cuda
+```
+
+**Training time estimates (single V100/A100):**
+| Stage | Epochs | Time |
+|:------|:-------|:-----|
+| Stage A (Detection) | 50 | ~2–4 hours |
+| Stage B (Segmentation) | 200 | ~8–12 hours |
+
+---
+
+## Output Data Structure
+
+### Spine Segmentation Output
+```
+output_folder/
+├── input/              # Preprocessed input images (1mm iso, LPI)
+├── preview/            # Preview images (JPEG)
+├── step1_raw/          # Step 1 raw model output
+├── step1_output/       # Step 1 iterative labeling result
+├── step1_cord/         # Spinal cord soft segmentation
+├── step1_canal/        # Spinal canal soft segmentation
+├── step1_levels/       # Single-voxel disc level markers in canal centerline
+├── step2_raw/          # Step 2 raw model output
+└── step2_output/       # Final labeled segmentation (vertebrae, discs, cord, canal)
+```
+
+### Clinical Report Output
+```
+report_output/
+├── result/
+│   ├── report.json                     # Complete JSON measurement report
+│   └── previews/                       # Visualization images
+│       ├── vertebrae/                  #   Vertebral height, width measurements
+│       ├── discs/                      #   Disc height, DIA measurements
+│       └── global/                     #   LL, SS, LSA angle visualizations
+└── raw/                                # Intermediate computation data
+```
+
+---
 
 ## List of Classes
 
-> The mapping is also available in the file `totalspineseg/resources/labels_maps/tss_map.json` 
+> The mapping is also available in `totalspineseg/resources/labels_maps/tss_map.json`
 
 | Label | Name |
 |:------|:-----|
@@ -310,11 +399,23 @@ The examples shown above include segmentation results on various contrasts (T1w,
 | 95 | disc_L4_L5 |
 | 100 | disc_L5_S |
 
-## How to cite us
+---
 
-If you find this work and/or code useful for your research, please cite our paper:
+## Documentation
 
-```
+Detailed documentation is available in the `docs/` directory:
+
+- **[LDH_TwoStage_Pipeline.md](docs/LDH_TwoStage_Pipeline.md)** — Comprehensive IVD degeneration pipeline architecture, implementation details, and usage guide
+- **[LDH_Quick_Reference_CN.md](docs/LDH_Quick_Reference_CN.md)** — Quick reference for IVD degeneration pipeline (Chinese)
+- **[Step1_2_5_Technical_Report_bilingual.md](docs/Step1_2_5_Technical_Report_bilingual.md)** — Bilingual technical report for Step 1, Step 2, and Step 5
+
+---
+
+## Acknowledgments
+
+This project is based on and extends the work of [TotalSpineSeg](https://github.com/neuropoly/totalspineseg) by the [NeuroPoly Lab](https://neuro.polymtl.ca/) at Polytechnique Montréal. Please cite the original work if you use this project:
+
+```bibtex
 @article{warszawer2025totalspineseg,
    title={TotalSpineSeg: Robust Spine Segmentation with Landmark-Based Labeling in MRI},
    author={Warszawer, Yehuda and Molinier, Nathan and Valosek, Jan and Benveniste, Pierre-Louis and Bédard, Sandrine and Shirbint, Emanuel and Mohamed, Feroze and Tsagkas, Charidimos and Kolind, Shannon and Lynd, Larry and Oh, Jiwon and Prat, Alexandre and Tam, Roger and Traboulsee, Anthony and Patten, Scott and Lee, Lisa Eunyoung and Achiron, Anat and Cohen-Adad, Julien},
@@ -323,3 +424,23 @@ If you find this work and/or code useful for your research, please cite our pape
    url={https://www.researchgate.net/publication/389881289_TotalSpineSeg_Robust_Spine_Segmentation_with_Landmark-Based_Labeling_in_MRI}
 }
 ```
+
+Please also cite nnU-Net, as the segmentation backbone is heavily based on it:
+
+```bibtex
+@article{isensee2021nnunet,
+   title={nnU-Net: a self-configuring method for deep learning-based biomedical image segmentation},
+   author={Isensee, Fabian and Jaeger, Paul F and Kohl, Simon AA and Petersen, Jens and Maier-Hein, Klaus H},
+   journal={Nature methods},
+   volume={18},
+   number={2},
+   pages={203--211},
+   year={2021}
+}
+```
+
+---
+
+## License
+
+See the [LICENSE](LICENSE) file for details.
