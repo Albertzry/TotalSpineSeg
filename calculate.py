@@ -58,7 +58,7 @@ LABEL_MAP: Dict[str, Any] = {
         "T6-T7": 77, "T7-T8": 78, "T8-T9": 79, "T9-T10": 80, "T10-T11": 81,
         "T11-T12": 82,
         "T12-L1": 91, "L1-L2": 92, "L2-L3": 93, "L3-L4": 94, "L4-L5": 95,
-        "L5-S": 100, "L5-S1": 100,  # Both names for compatibility
+        "L5-S": 100,
     },
     "vertebrae": {
         "C1": 11, "C2": 12, "C3": 13, "C4": 14, "C5": 15, "C6": 16, "C7": 17,
@@ -339,7 +339,7 @@ def save_visualization(
       kind == "mask": {"mask": 2D bool array, "color": "r" or RGB tuple, "alpha": 0.55}
       kind == "line": {"p0": (x0,y0), "p1": (x1,y1), "color": "y", "lw": 2, "label": "...", "linestyle": "-" (solid) or "--" (dashed)}
       kind == "scatter": {"pts": (N,2), "color":"c", "s": 10, "label": "..."}
-      kind == "text": {"xy": (x,y), "text": "...", "color":"w", "fontsize": 10}
+      kind == "text": {"xy": (x,y), "text": "...", "color":"w", "fontsize": 14}
       kind == "bbox": {"xywh": (x,y,w,h), "color":"g", "lw": 2}
       kind == "arc": {"center": (x,y), "angle_start": deg, "angle_end": deg, "radius": float, "color": "y", "lw": 2}
     """
@@ -414,7 +414,7 @@ def save_visualization(
     fig = plt.figure(figsize=(7, 7), dpi=160)
     ax = fig.add_subplot(1, 1, 1)
     ax.imshow(np.clip(rgb, 0, 255).astype(np.uint8), origin='upper')
-    ax.set_title(title, fontsize=12)
+    ax.set_title(title, fontsize=16)
     ax.axis("off")
 
     # Add other overlays (lines, text, etc.)
@@ -448,7 +448,7 @@ def save_visualization(
                     my + ny * offset_px,
                     str(kw["label"]),
                     color=kw.get("color", "y"),
-                    fontsize=kw.get("fontsize", 8),
+                    fontsize=kw.get("fontsize", 12),
                     ha="center", va="center",
                     bbox=dict(facecolor="black", alpha=0.5, edgecolor="none", pad=1),
                 )
@@ -470,7 +470,7 @@ def save_visualization(
                 xy_transformed[1],
                 str(kw["text"]),
                 color=kw.get("color", "w"),
-                fontsize=kw.get("fontsize", 9),
+                fontsize=kw.get("fontsize", 13),
                 ha=kw.get("ha", "left"), va=kw.get("va", "center"),
                 bbox=dict(facecolor="black", alpha=0.5, edgecolor="none", pad=1),
             )
@@ -1654,6 +1654,14 @@ def calc_disc_height_corrected(
     dhi = None
     if upper_vh_avg_mm is not None and lower_vh_avg_mm is not None:
         denom = float((upper_vh_avg_mm + lower_vh_avg_mm) / 2.0)
+        if denom > 1e-6:
+            dhi = float(dh_mm / denom)
+    elif upper_vh_avg_mm is not None:
+        denom = float(upper_vh_avg_mm)
+        if denom > 1e-6:
+            dhi = float(dh_mm / denom)
+    elif lower_vh_avg_mm is not None:
+        denom = float(lower_vh_avg_mm)
         if denom > 1e-6:
             dhi = float(dh_mm / denom)
 
@@ -3954,7 +3962,7 @@ def draw_cobb_visualization(
             "xy": (label_x, label_y),
             "text": f"{angle_deg:.1f}°",
             "color": "white",
-            "fontsize": 9,
+            "fontsize": 13,
         }))
     
     save_visualization(save_path, slice_img, title, overlays)
@@ -4536,7 +4544,7 @@ def visualize_SS_S1(
             "xy": (arc_center[0] + radius + 10, arc_center[1]),
             "text": f"{angle_deg:.1f}°",
             "color": "white",
-            "fontsize": 9,
+            "fontsize": 13,
         }))
     
     save_visualization(save_path, slice_img, title, overlays)
@@ -4663,23 +4671,17 @@ def visualize_DIA(
             if 0 <= x0_upper < w:
                 overlays.append(("line", {"p0": (x0_upper, 0), "p1": (x0_upper, h - 1), "color": "cyan", "lw": 1, "linestyle": "-"}))
     
-    # Draw lower endplate line (thin, magenta) - clipped to lower vertebra mask
+    # Draw lower endplate line (thin, magenta) - clipped to lower vertebra mask's x-range
     vx_lower, vy_lower, x0_lower, y0_lower = line_lower
     if abs(vx_lower) > 1e-9:
         # Convert (vx, vy, x0, y0) to (k, b) format: y = k*x + b
         k_lower = vy_lower / vx_lower
         b_lower = y0_lower - k_lower * x0_lower
         
-        # Clip line to lower vertebra mask (use isolated body if available)
+        # Clip line to lower vertebra mask x-range directly (no isolate_vertebral_body for S)
         clipped_lower = None
         if lower_mask is not None and lower_mask.sum() > 0:
-            # Use isolated vertebral body for clipping (same as used for line extraction)
-            lower_body = isolate_vertebral_body(lower_mask)
-            if lower_body.sum() > 0:
-                clipped_lower = clip_line_to_mask((k_lower, b_lower), lower_body)
-            else:
-                # Fallback to original mask if isolation fails
-                clipped_lower = clip_line_to_mask((k_lower, b_lower), lower_mask)
+            clipped_lower = clip_line_to_mask((k_lower, b_lower), lower_mask)
         
         if clipped_lower is not None:
             p0_lower, p1_lower = clipped_lower
@@ -4730,7 +4732,7 @@ def visualize_DIA(
             "xy": (label_x, label_y),
             "text": f"{angle_deg:.1f}°",
             "color": "white",
-            "fontsize": 9,
+            "fontsize": 13,
         }))
     
     save_visualization(save_path, slice_img, f"Disc Inclination Angle {name}", overlays)
@@ -4788,8 +4790,8 @@ def calc_cobb_angles(
     # S1: Use specialized get_s1_superior_line (Frustum Top Surface method)
     mask_S1 = (step2_zyx == label_S1).astype(np.uint8)[:, :, mid_sag_x]
     mask_L5_ref = (step2_zyx == label_L5).astype(np.uint8)[:, :, mid_sag_x] # Needed for S1 guidance
-    # Get L5-S1 disc mask (label 100) for better frustum top surface extraction
-    label_L5S1_disc = int(LABEL_MAP["discs"]["L5-S1"])
+    # Get L5-S disc mask (label 100) for better frustum top surface extraction
+    label_L5S1_disc = int(LABEL_MAP["discs"]["L5-S"])
     mask_L5S1_disc = (step2_zyx == label_L5S1_disc).astype(np.uint8)[:, :, mid_sag_x]
     # Get spinal canal mask (label 2) for S1 superior endplate extraction
     mask_spinal_canal = (step2_zyx == LABEL_MAP["spinal_canal"]).astype(np.uint8)[:, :, mid_sag_x]
@@ -4899,7 +4901,7 @@ def calc_cobb_angles(
         # Get disc masks for LL calculation (same as visualization)
         # L1 superior endplate uses T12-L1 disc (label 91, above L1)
         mask_T12L1_disc = (step2_zyx == LABEL_MAP["discs"]["T12-L1"]).astype(np.uint8)[:, :, mid_sag_x] if "T12-L1" in LABEL_MAP.get("discs", {}) else None
-        mask_L5S1_disc = (step2_zyx == LABEL_MAP["discs"]["L5-S1"]).astype(np.uint8)[:, :, mid_sag_x] if "L5-S1" in LABEL_MAP.get("discs", {}) else None
+        mask_L5S1_disc = (step2_zyx == LABEL_MAP["discs"]["L5-S"]).astype(np.uint8)[:, :, mid_sag_x] if "L5-S" in LABEL_MAP.get("discs", {}) else None
         mask_spinal_canal = (step2_zyx == LABEL_MAP["spinal_canal"]).astype(np.uint8)[:, :, mid_sag_x] if "spinal_canal" in LABEL_MAP else None
         
         # Calculate LL using new method (with vertebral body isolation and same method as visualization)
@@ -5490,15 +5492,10 @@ def generate_clinical_report(mri_path: str, step2_path: str, ldh_path: str, outp
         "L2-L3": ("L2", "L3"),
         "L3-L4": ("L3", "L4"),
         "L4-L5": ("L4", "L5"),
-        "L5-S1": ("L5", "S"),  # S = Sacrum
-        "L5-S": ("L5", "S"),  # Alternative name
+        "L5-S": ("L5", "S"),  # S = Sacrum
     }
 
     for dn, did in discs.items():
-        # Skip L5-S1 disc for DIA calculation
-        if dn == "L5-S1" or dn == "L5-S":
-            continue
-        
         up, low = disc_to_upper_lower.get(dn, (None, None))
         up_vh = vh_avg_by_v.get(up) if up is not None else None
         low_vh = vh_avg_by_v.get(low) if low is not None else None
