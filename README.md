@@ -1,4 +1,4 @@
-# TotalSpineSeg-v2
+# SpineSegPlus
 
 > **Note:** This project is based on [TotalSpineSeg](https://github.com/neuropoly/totalspineseg) by [NeuroPoly Lab](https://neuro.polymtl.ca/). We have made significant architectural extensions on top of the original project, including a two-stage lumbar intervertebral disc degeneration (IVD degeneration) segmentation pipeline, a comprehensive clinical parameter computation module, and an end-to-end inference workflow. Please see the [Acknowledgments](#acknowledgments) section for the original citation.
 
@@ -33,7 +33,7 @@
 
 ## Overview
 
-**TotalSpineSeg-v2** is a comprehensive tool for automatic analysis of spinal MRI images. Building upon the original [TotalSpineSeg](https://github.com/neuropoly/totalspineseg), this project extends the pipeline with:
+**SpineSegPlus** is a comprehensive tool for automatic analysis of spinal MRI images. Building upon the original [TotalSpineSeg](https://github.com/neuropoly/totalspineseg), this project extends the pipeline with:
 
 1. **Full-spine instance segmentation** — Automatic segmentation and labeling of all vertebrae (C1–L5), intervertebral discs (IVDs), sacrum, spinal cord, and spinal canal, robust to various MRI contrasts, acquisition orientations, and resolutions.
 2. **Two-stage IVD degeneration detection and segmentation** — A novel pipeline that detects and segments lumbar intervertebral disc degeneration using anatomical priors and surface-aware loss functions.
@@ -119,7 +119,7 @@ All measurements are output as a structured JSON report with accompanying visual
 ## Project Structure
 
 ```
-TotalSpineSeg-v2/
+SpineSegPlus/
 ├── totalspineseg/                  # Core package
 │   ├── __init__.py                 # Package exports
 │   ├── inference.py                # Main spine segmentation inference (Step 1 & Step 2)
@@ -188,10 +188,10 @@ TotalSpineSeg-v2/
    conda activate tss
    ```
 
-2. Install TotalSpineSeg-v2:
+2. Install SpineSegPlus:
    ```bash
-   git clone <repository-url> TotalSpineSeg-v2
-   cd TotalSpineSeg-v2
+   git clone <repository-url> SpineSegPlus
+   cd SpineSegPlus
    python3 -m pip install -e .[nnunetv2]
    ```
 
